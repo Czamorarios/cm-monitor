@@ -1,0 +1,12 @@
+state/
+reports/
+.env
+.env.bak*
+*.bak
+salida.txt
+reporte.txt
+node_modules/
+
+# Perfil privado: NUNCA debe subirse a un repositorio publico.
+checks.private.json
+PLAN-MONITOREO.md

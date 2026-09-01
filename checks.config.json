@@ -1,0 +1,249 @@
+{
+  "_comentario": "Perfil PUBLICO de cm-monitor. Este archivo vive en un repositorio publico, asi que SOLO contiene revisiones sobre cosas que cualquier visitante del sitio ya puede ver por si mismo: el HTML del home, los archivos que ese HTML pide, el DNS, el certificado, las librerias de terceros que la propia pagina carga, y los catalogos de juego que la app lee desde el navegador de cualquier usuario.",
+  "_regla": "NO agregar aqui nada que no sea observable desde el navegador de un visitante anonimo. Las revisiones sensibles (funciones de dinero y de administracion, vigilancia de las reglas de Firestore) van en checks.private.json, que nunca se sube.",
+  "nombre": "CMillonario",
+  "tz": "America/Mexico_City",
+  "umbrales": {
+    "timeoutMs": 20000,
+    "ttfbHomeMs": 2500,
+    "latenciaFuncionMs": 15000,
+    "certDiasAviso": 21,
+    "certDiasCritico": 7,
+    "fallosParaAlertar": 2,
+    "reavisoMinutos": 30,
+    "concurrencia": 8
+  },
+  "sitio": {
+    "principal": "https://cmillonario.com",
+    "marcadorHtml": "CMillonario - Jugar es f",
+    "dominios": [
+      {
+        "url": "https://cmillonario.com",
+        "sev": "critico"
+      },
+      {
+        "url": "https://www.cmillonario.com",
+        "sev": "critico"
+      },
+      {
+        "url": "https://cmillonario.mx",
+        "sev": "aviso"
+      },
+      {
+        "url": "https://www.cmillonario.mx",
+        "sev": "aviso"
+      }
+    ],
+    "ipsEsperadas": [
+      "199.36.158.100"
+    ],
+    "hostCert": "cmillonario.com",
+    "emisoresDeInterceptacion": [
+      "AVG",
+      "Avast",
+      "Kaspersky",
+      "BitDefender",
+      "ESET",
+      "Fortinet",
+      "Zscaler",
+      "Sophos",
+      "Norton",
+      "McAfee"
+    ],
+    "_notaCert": "Si un antivirus local intercepta TLS, la revision del certificado no es fiable. Desde GitHub Actions si lo es."
+  },
+  "firebase": {
+    "_nota": "A proposito NO se guardan aqui el projectId ni la API key. El monitor los lee en vivo de /__/firebase/init.json del propio sitio, que es publico por diseno (lo descarga el navegador de cualquier visitante). Asi este repositorio no contiene ningun identificador de la plataforma."
+  },
+  "funciones": {
+    "plantillaGen2": "https://{f}-ykzipn2nea-uc.a.run.app",
+    "statusVivos": [
+      200,
+      400,
+      401,
+      403,
+      405
+    ],
+    "_nota": "Solo las funciones de catalogo de juego, que son las que el navegador de un visitante anonimo llama para pintar el home. Las de compra, pago, conciliacion y administracion viven en el perfil privado.",
+    "gen2": [
+      {
+        "f": "draws",
+        "sev": "critico",
+        "que": "catalogo de sorteos"
+      },
+      {
+        "f": "getgameinfofunction",
+        "sev": "critico",
+        "que": "info de juegos"
+      },
+      {
+        "f": "prizes",
+        "sev": "critico",
+        "que": "premios"
+      }
+    ]
+  },
+  "terceros": [
+    {
+      "id": "nuvei_sdk",
+      "url": "https://cdn.safecharge.com/safecharge_resources/v1/checkout/checkout.js",
+      "sev": "critico",
+      "que": "SDK de pagos que carga la propia pagina"
+    },
+    {
+      "id": "zendesk",
+      "url": "https://static.zdassets.com/ekr/snippet.js?key=af776794-8209-40a8-8948-5ae7d389c5a4",
+      "sev": "aviso",
+      "que": "widget de soporte"
+    },
+    {
+      "id": "gtm",
+      "url": "https://www.googletagmanager.com/gtm.js?id=GTM-P8JCV447",
+      "sev": "info",
+      "que": "Google Tag Manager"
+    }
+  ],
+  "firestore": {
+    "_nota": "Solo colecciones de catalogo, las mismas que la app lee desde el navegador de un visitante sin iniciar sesion. http = codigo de acceso esperado (200 = lectura publica).",
+    "accesoEsperado": [
+      {
+        "col": "gamesHome",
+        "http": 200,
+        "sev": "critico",
+        "que": "catalogo del home"
+      },
+      {
+        "col": "gameResult",
+        "http": 200,
+        "sev": "critico",
+        "que": "resultados de sorteos"
+      },
+      {
+        "col": "resultsLotenal",
+        "http": 200,
+        "sev": "critico",
+        "que": "resultados Loteria tradicional"
+      },
+      {
+        "col": "drawsClosed",
+        "http": 200,
+        "sev": "aviso",
+        "que": "sorteos cerrados"
+      },
+      {
+        "col": "legal",
+        "http": 200,
+        "sev": "info",
+        "que": "textos legales"
+      }
+    ]
+  },
+  "juegos": {
+    "_comentario": "maxHoras = cuanto puede tardar como maximo en aparecer el resultado del ultimo sorteo antes de considerarlo atrasado. Derivado del calendario publico de sorteos.",
+    "resultados": [
+      {
+        "product": "Tris",
+        "maxHoras": 30,
+        "sev": "critico",
+        "cal": "varios al dia"
+      },
+      {
+        "product": "Chispazo",
+        "maxHoras": 30,
+        "sev": "critico",
+        "cal": "2 al dia (15:45 y 23:50)"
+      },
+      {
+        "product": "Melate",
+        "maxHoras": 84,
+        "sev": "critico",
+        "cal": "Mie/Vie/Dom"
+      },
+      {
+        "product": "MelateRetro",
+        "maxHoras": 108,
+        "sev": "critico",
+        "cal": "Mar/Sab"
+      },
+      {
+        "product": "Progol",
+        "maxHoras": 216,
+        "sev": "aviso",
+        "cal": "semanal"
+      },
+      {
+        "product": "ProgolMediaSemana",
+        "maxHoras": 216,
+        "sev": "aviso",
+        "cal": "semanal"
+      },
+      {
+        "product": "MiProgol",
+        "maxHoras": 216,
+        "sev": "aviso",
+        "cal": "semanal"
+      },
+      {
+        "product": "GanaGato",
+        "maxHoras": 120,
+        "sev": "aviso",
+        "cal": "por confirmar"
+      },
+      {
+        "product": "Protouch",
+        "maxHoras": 120,
+        "sev": "aviso",
+        "cal": "por confirmar"
+      }
+    ],
+    "ventanaVenta": [
+      {
+        "col": "progol",
+        "sev": "critico",
+        "que": "Progol"
+      },
+      {
+        "col": "progolMediaSemana",
+        "sev": "aviso",
+        "que": "Progol Media Semana"
+      },
+      {
+        "col": "protouch",
+        "sev": "aviso",
+        "que": "Protouch"
+      }
+    ],
+    "vigilarProximoSorteo": [
+      "PronoSports",
+      "Prono Sports",
+      "Progol",
+      "Progol MS",
+      "Progol Revancha",
+      "Protouch"
+    ],
+    "_notaProximoSorteo": "Lista de juegos cuya tarjeta en el home muestra al visitante la fecha del proximo sorteo. Los demas tienen ese campo sin mantener y se excluyen para no generar alarma permanente."
+  },
+  "ventanas": {
+    "ventaElectronicosCerrada": {
+      "desde": "21:00",
+      "hasta": "22:45",
+      "dias": "todos",
+      "que": "Horario publicado en que los Sorteos Electronicos dejan de venderse. Los tradicionales se venden 24 h. En esta ventana no se alerta por falta de sorteo vendible en juegos electronicos."
+    }
+  },
+  "reconocidos": {
+    "_comentario": "Revisiones que ya sabemos en rojo y estan en proceso de arreglo: siguen en rojo en pantalla pero no repiten alerta.",
+    "ids": []
+  },
+  "desactivadas": {
+    "_comentario": "Ids de revisiones apagadas a proposito.",
+    "ids": []
+  },
+  "alertas": {
+    "telegram": true,
+    "severidadesQueAlertan": [
+      "critico",
+      "aviso"
+    ]
+  }
+}

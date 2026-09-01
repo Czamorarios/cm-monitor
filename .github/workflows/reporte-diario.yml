@@ -1,0 +1,63 @@
+name: Reporte diario CMillonario
+
+# 08:00 hora de CDMX. Mexico no cambia de horario desde 2022, asi que CDMX = UTC-6
+# todo el ano: 14:00 UTC.
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+jobs:
+  reporte:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Recuperar el estado acumulado
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: reporte-${{ github.run_id }}
+          restore-keys: |
+            estado-
+
+      - name: Mandar el reporte al grupo de Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NO_COLOR: '1'
+        run: |
+          set +e
+          node monitor.mjs --reporte --enviar > reporte.txt 2>&1
+          codigo=$?
+          # Log publico: el reporte contiene el historial de fallas de la
+          # plataforma, asi que NO se imprime aqui. Va solo a Telegram.
+          if [ $codigo -ge 2 ]; then
+            echo "El reporte fallo al generarse (codigo $codigo)."
+            exit $codigo
+          fi
+          echo "Reporte enviado por Telegram."
+
+      # GitHub DESACTIVA los crones de un repositorio sin actividad por 60 dias.
+      # Sin esto, el monitoreo se apagaria solo en dos meses, en silencio.
+      # Se sube unicamente una marca de tiempo: ningun dato de la plataforma.
+      - name: Latido para que GitHub no desactive los crones
+        run: |
+          git config user.name "cm-monitor"
+          git config user.email "cm-monitor@users.noreply.github.com"
+          date -u +"%Y-%m-%dT%H:%MZ" > .github/latido.txt
+          git add .github/latido.txt
+          if git diff --cached --quiet; then
+            echo "Sin cambios."
+          else
+            git commit -m "latido $(date -u +%Y-%m-%d)"
+            git push
+          fi

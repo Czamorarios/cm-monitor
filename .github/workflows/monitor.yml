@@ -1,0 +1,73 @@
+name: Monitoreo CMillonario
+
+# Cada 5 minutos. En repositorios PUBLICOS GitHub Actions no cobra minutos, por eso
+# se puede a esta frecuencia. GitHub puede retrasar los crones unos minutos en horas
+# de mucha carga; es normal y esperado.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: monitoreo-cmillonario
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # El estado tiene que sobrevivir entre corridas. Sin el, la logica de
+      # "2 fallos seguidos" y "avisar solo en transicion" no funciona y el monitor
+      # repetiria la misma alerta cada 5 minutos.
+      # La clave nunca coincide a proposito: restore-keys agarra la mas reciente.
+      - name: Recuperar el estado de la corrida anterior
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: estado-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            estado-
+
+      - name: Revisar la plataforma
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NO_COLOR: '1'
+        run: |
+          set +e
+          # --publico: aunque alguien deje aqui un checks.private.json, este workflow
+          # NUNCA ejecuta las revisiones sensibles. Cinturon y tirantes.
+          node monitor.mjs --publico > salida.txt 2>&1
+          codigo=$?
+
+          # ─────────────────────────────────────────────────────────────────
+          # ESTE LOG ES PUBLICO. Cualquiera en internet puede leerlo.
+          # Por eso NO se imprime nada sobre el estado de la plataforma: el
+          # detalle de las revisiones se manda unicamente al grupo de Telegram.
+          # Publicar aqui "3 revisiones criticas en rojo" seria un tablero
+          # publico y en vivo de cuando la plataforma esta debil.
+          # ─────────────────────────────────────────────────────────────────
+          if [ $codigo -ge 2 ]; then
+            echo "El monitor fallo al ejecutarse (codigo $codigo). Ultimas lineas:"
+            tail -n 10 salida.txt
+            exit $codigo
+          fi
+
+          echo "Revision completada. El detalle se envio por Telegram."
+
+      - name: Guardar el estado para la siguiente corrida
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: estado-${{ github.run_id }}-${{ github.run_attempt }}
