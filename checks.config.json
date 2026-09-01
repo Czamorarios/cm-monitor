@@ -225,7 +225,19 @@
     ],
     "_notaProximoSorteo": "Lista de juegos cuya tarjeta en el home muestra al visitante la fecha del proximo sorteo. Los demas tienen ese campo sin mantener y se excluyen para no generar alarma permanente.",
     "toleranciaVentaHoras": 12,
-    "_notaTolerancia": "Horas que puede pasar sin ningun concurso vendible antes de considerarlo falla. Entre que cierra un concurso y abre el siguiente hay un hueco normal; solo alarma si se alarga, porque entonces el nuevo no se cargo. Se puede afinar por juego con toleranciaHoras en cada entrada de ventanaVenta."
+    "_notaTolerancia": "Horas que puede pasar sin ningun concurso vendible antes de considerarlo falla. Entre que cierra un concurso y abre el siguiente hay un hueco normal; solo alarma si se alarga, porque entonces el nuevo no se cargo. Se puede afinar por juego con toleranciaHoras en cada entrada de ventanaVenta.",
+    "disponibilidad": [
+      {
+        "juego": "PronoSports",
+        "campoCierre": "close",
+        "sev": "critico",
+        "limite": {
+          "dia": "jueves",
+          "hora": "08:00"
+        },
+        "que": "El concurso cierra el miercoles en la noche. El nuevo debe estar cargado a mas tardar el jueves 08:00 (CDMX). Si a esa hora el catalogo sigue mostrando un cierre ya pasado, es que el concurso nuevo no se cargo y nadie puede jugar."
+      }
+    ]
   },
   "ventanas": {
     "ventaElectronicosCerrada": {

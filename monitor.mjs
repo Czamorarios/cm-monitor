@@ -156,6 +156,58 @@ function enVentana(ventana, tz) {
   return ini <= fin ? (ahora >= ini && ahora < fin) : (ahora >= ini || ahora < fin);
 }
 
+const DIAS = { domingo: 0, lunes: 1, martes: 2, miercoles: 3, 'miércoles': 3, jueves: 4, viernes: 5, sabado: 6, 'sábado': 6 };
+
+/** Minutos de desfase de la zona tz respecto a UTC en un instante dado (respeta horario de verano). */
+function offsetMinutos(tz, ms) {
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date(ms)).reduce((a, x) => (a[x.type] = x.value, a), {});
+  const comoUTC = Date.UTC(+p.year, +p.month - 1, +p.day, (+p.hour) % 24, +p.minute, +p.second);
+  return (comoUTC - Math.floor(ms / 1000) * 1000) / 60000;
+}
+
+function partesEn(tz, ms) {
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false, weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(ms)).reduce((a, x) => (a[x.type] = x.value, a), {});
+  return { anio: +p.year, mes: +p.month, dia: +p.day, nDia: { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[p.weekday] };
+}
+
+/** Primer instante posterior a desdeMs que cae en ese dia de la semana y hora, en la zona tz. */
+function proximoDiaHora(desdeMs, nombreDia, hhmm, tz) {
+  const objetivo = DIAS[String(nombreDia).toLowerCase()];
+  if (objetivo === undefined) return null;
+  const [h, m] = String(hhmm).split(':').map(Number);
+  for (let i = 0; i <= 8; i++) {
+    const ms = desdeMs + i * 86400000;
+    const p = partesEn(tz, ms);
+    if (p.nDia !== objetivo) continue;
+    const inst = Date.UTC(p.anio, p.mes - 1, p.dia, h, m) - offsetMinutos(tz, ms) * 60000;
+    if (inst > desdeMs) return inst;
+  }
+  return null;
+}
+
+/**
+ * Interpreta una fecha que puede venir en ISO o en el formato de texto que usa el
+ * catalogo: "September 2, 2026 at 09:01:00 PM UTC" (con o sin desfase, "UTC-5").
+ */
+function fechaFlexible(v) {
+  if (v == null) return NaN;
+  const directo = Date.parse(v);
+  if (!Number.isNaN(directo)) return directo;
+  const m = String(v).trim().match(/^([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\s+at\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\s*(?:UTC\s*([+-]\d{1,2})?)?$/i);
+  if (!m) return NaN;
+  const meses = { january: 0, february: 1, march: 2, april: 3, may: 4, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11 };
+  const mes = meses[m[1].toLowerCase()];
+  if (mes === undefined) return NaN;
+  let h = Number(m[4]);
+  if (m[7]) { h %= 12; if (/pm/i.test(m[7])) h += 12; }
+  return Date.UTC(+m[3], mes, +m[2], h, +m[5], +(m[6] || 0)) - (m[8] ? Number(m[8]) : 0) * 3600000;
+}
+
 /** Peticion HTTP medida. Nunca lanza: los errores vienen en el resultado. */
 async function pedir(url, opciones = {}) {
   const { metodo = 'GET', timeoutMs = 20000, leerCuerpo = false, maxBytes = 300000, cuerpo = null, headers = {} } = opciones;
@@ -562,6 +614,45 @@ function construirRevisiones(cfg) {
 
         const prox = docs.map((d) => `${d.draw || d._id}: ${String(d.saleDateOpen).slice(0, 16)} a ${String(d.saleDateClose).slice(0, 16)}`).join(' | ');
         return { ok: false, detalle: `ningun concurso en venta ni programado (${prox})`, ms: r.ms };
+      },
+    });
+  }
+
+  /**
+   * Juegos con ciclo semanal: el concurso cierra un dia fijo y el siguiente tiene
+   * que estar cargado antes de una hora limite. Que no haya concurso vigente NO es
+   * falla mientras no se pase ese limite; pasado el limite, si lo es, porque
+   * significa que nadie puede jugar.
+   * Se lee del catalogo del home, que es exactamente lo que ve el visitante.
+   */
+  for (const d of cfg.juegos?.disponibilidad ?? []) {
+    add({
+      id: `neg_disp_${String(d.juego).replace(/\W/g, '')}`, capa: 3, sev: d.sev || 'critico',
+      nombre: `Concurso cargado: ${d.juego}`,
+      async run(ctx) {
+        const docs = ctx.gamesHome;
+        if (!docs) return { ok: false, detalle: 'no se pudo leer el catalogo del home' };
+        const doc = docs.find((x) => [x.shortName, x.name].some((n) => String(n).toLowerCase() === String(d.juego).toLowerCase()));
+        if (!doc) return { ok: false, detalle: `${d.juego} no aparece en el catalogo del home` };
+
+        const campo = d.campoCierre || 'close';
+        const crudo = doc[campo];
+        const cierre = fechaFlexible(crudo);
+        if (Number.isNaN(cierre))
+          return { ok: false, detalle: `la fecha de cierre no es interpretable ("${String(crudo).slice(0, 44)}")` };
+
+        const ahora = Date.now();
+        if (cierre > ahora)
+          return { ok: true, detalle: `concurso vigente, cierra en ${((cierre - ahora) / 3600000).toFixed(1)}h` };
+
+        const limite = proximoDiaHora(cierre, d.limite?.dia, d.limite?.hora, cfg.tz);
+        if (limite == null) return { ok: false, detalle: 'la regla de limite esta mal configurada' };
+
+        const cerroHace = ((ahora - cierre) / 3600000).toFixed(1);
+        if (ahora < limite)
+          return { ok: true, detalle: `cerro hace ${cerroHace}h; el nuevo debe cargarse antes del ${d.limite.dia} ${d.limite.hora} (faltan ${((limite - ahora) / 3600000).toFixed(1)}h)` };
+
+        return { ok: false, detalle: `cerro hace ${cerroHace}h y ya paso el limite (${d.limite.dia} ${d.limite.hora}) sin que se cargue el nuevo concurso -> no se puede jugar` };
       },
     });
   }
