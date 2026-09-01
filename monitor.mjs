@@ -537,8 +537,31 @@ function construirRevisiones(cfg) {
           const restan = ((Date.parse(d.saleDateClose) - ahora) / 3600000).toFixed(1);
           return { ok: true, detalle: `concurso ${d.draw || d._id} en venta, cierra en ${restan}h`, ms: r.ms };
         }
+
+        // Que no haya nada en venta NO es de por si una falla: entre que cierra un
+        // concurso y abre el siguiente hay un hueco natural. Solo es problema si ese
+        // hueco se alarga, porque entonces el nuevo concurso no se cargo.
+        const programado = docs
+          .map((d) => ({ d, abre: Date.parse(d.saleDateOpen) }))
+          .filter((x) => !Number.isNaN(x.abre) && x.abre > ahora)
+          .sort((a, b) => a.abre - b.abre)[0];
+        if (programado) {
+          const faltan = ((programado.abre - ahora) / 3600000).toFixed(1);
+          return { ok: true, detalle: `entre concursos: el siguiente (${programado.d.draw || programado.d._id}) ya esta cargado y abre en ${faltan}h`, ms: r.ms };
+        }
+
+        const cierres = docs.map((d) => Date.parse(d.saleDateClose)).filter((t) => !Number.isNaN(t) && t <= ahora);
+        const tolerancia = (v.toleranciaHoras ?? cfg.juegos?.toleranciaVentaHoras ?? 12) * 3600000;
+        if (cierres.length) {
+          const desde = ahora - Math.max(...cierres);
+          const horas = (desde / 3600000).toFixed(1);
+          if (desde < tolerancia)
+            return { ok: true, detalle: `entre concursos: la venta cerro hace ${horas}h y aun no abre la siguiente (normal hasta ${tolerancia / 3600000}h)`, ms: r.ms };
+          return { ok: false, detalle: `sin concurso vendible desde hace ${horas}h (limite ${tolerancia / 3600000}h) -> el siguiente concurso no se ha cargado`, ms: r.ms };
+        }
+
         const prox = docs.map((d) => `${d.draw || d._id}: ${String(d.saleDateOpen).slice(0, 16)} a ${String(d.saleDateClose).slice(0, 16)}`).join(' | ');
-        return { ok: false, detalle: `ningun concurso en venta ahora mismo (${prox})`, ms: r.ms };
+        return { ok: false, detalle: `ningun concurso en venta ni programado (${prox})`, ms: r.ms };
       },
     });
   }

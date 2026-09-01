@@ -200,12 +200,14 @@
       {
         "col": "progol",
         "sev": "critico",
-        "que": "Progol"
+        "que": "Progol",
+        "toleranciaHoras": 24
       },
       {
         "col": "progolMediaSemana",
         "sev": "aviso",
-        "que": "Progol Media Semana"
+        "que": "Progol Media Semana",
+        "toleranciaHoras": 24
       },
       {
         "col": "protouch",
@@ -221,7 +223,9 @@
       "Progol Revancha",
       "Protouch"
     ],
-    "_notaProximoSorteo": "Lista de juegos cuya tarjeta en el home muestra al visitante la fecha del proximo sorteo. Los demas tienen ese campo sin mantener y se excluyen para no generar alarma permanente."
+    "_notaProximoSorteo": "Lista de juegos cuya tarjeta en el home muestra al visitante la fecha del proximo sorteo. Los demas tienen ese campo sin mantener y se excluyen para no generar alarma permanente.",
+    "toleranciaVentaHoras": 12,
+    "_notaTolerancia": "Horas que puede pasar sin ningun concurso vendible antes de considerarlo falla. Entre que cierra un concurso y abre el siguiente hay un hueco normal; solo alarma si se alarga, porque entonces el nuevo no se cargo. Se puede afinar por juego con toleranciaHoras en cada entrada de ventanaVenta."
   },
   "ventanas": {
     "ventaElectronicosCerrada": {
@@ -236,8 +240,13 @@
     "ids": []
   },
   "desactivadas": {
-    "_comentario": "Ids de revisiones apagadas a proposito.",
-    "ids": []
+    "_comentario": "Ids de revisiones apagadas a proposito. Se siguen construyendo pero no se ejecutan, no cuentan en el total y no pueden alertar.",
+    "ids": [
+      "neg_proximo_sorteo"
+    ],
+    "_porQue": {
+      "neg_proximo_sorteo": "Desactivada el 2026-09-01 a peticion de Cesar. Progol, Progol Media Semana, PronoSports y Protouch traen fechas de proximo sorteo que el equipo esta corrigiendo, asi que la revision estaria en amarillo permanente por un trabajo ya conocido y en curso. PARA REACTIVARLA: quita 'neg_proximo_sorteo' de la lista ids de arriba. No hay que tocar nada mas: la revision y su lista blanca (juegos.vigilarProximoSorteo) siguen intactas."
+    }
   },
   "alertas": {
     "telegram": true,

@@ -30,7 +30,15 @@ node monitor.mjs
 
 **Capa 2 — Backend público.** Las funciones de catálogo de juego que llama el navegador de un visitante, que Firebase Auth responda, que las colecciones de catálogo de Firestore se puedan leer, y las tres librerías de terceros que la página carga.
 
-**Capa 3 — Negocio.** Que los resultados de cada juego estén al día según su calendario, que el catálogo del home tenga juegos activos, que la fecha de "Próximo sorteo" que ve el visitante siga vigente, y que las ventanas de venta estén abiertas cuando deben.
+**Capa 3 — Negocio.** Que los resultados de cada juego estén al día según su calendario, que el catálogo del home tenga juegos activos, y que haya concurso vendible en los juegos que lo requieren.
+
+Sobre esto último: que en un momento dado no haya nada en venta **no es de por sí una falla**. Entre que cierra un concurso y abre el siguiente hay un hueco natural. La revisión solo alerta si ese hueco se alarga más de lo previsto (`toleranciaVentaHoras`, afinable por juego), porque entonces significa que el siguiente concurso no se cargó. Si el próximo concurso ya está programado, tampoco alerta.
+
+### Revisiones desactivadas
+
+`desactivadas.ids` en la configuración apaga revisiones concretas: se siguen construyendo pero no se ejecutan, no cuentan en el total y no pueden alertar. Es para trabajos ya conocidos y en curso, donde la revisión estaría en amarillo permanente sin aportar nada.
+
+Ahora mismo está apagada `neg_proximo_sorteo` (la fecha de "Próximo sorteo" que ve el visitante). Para reactivarla basta con quitar su id de esa lista; la revisión y su lista blanca siguen intactas.
 
 ## Por qué no basta con revisar el código HTTP
 
