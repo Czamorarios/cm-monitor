@@ -73,8 +73,16 @@ Si no hay credenciales, el monitor funciona igual y solo avisa que no pudo manda
 
 | Qué | Cada cuánto | Dónde |
 |---|---|---|
-| Las 30 revisiones | 5 min | `.github/workflows/monitor.yml` |
+| Las revisiones públicas | 5 min, en bucle | `.github/workflows/monitor.yml` |
 | Reporte de 24 h al grupo | 8:00 CDMX | `.github/workflows/reporte-diario.yml` |
+
+### Por qué un bucle y no un cron de 5 minutos
+
+**Medido en este repositorio el 2026-09-02:** con `cron: */5 * * * *`, GitHub disparó **4 corridas en 17 horas**, con intervalos reales de 235, 307 y 282 minutos. El cron corrió cada 4-5 **horas**, no cada 5 minutos. GitHub documenta que los workflows programados se retrasan bajo carga; en la práctica los intervalos cortos son inservibles.
+
+La salida aprovecha lo que sí ganamos al hacer público el repositorio: **Actions no cobra minutos**. En vez de pedirle a GitHub que nos despierte, el workflow mantiene **un trabajo vivo que revisa cada 5 minutos durante ~5 horas** y al terminar vuelve a lanzarse solo. El cron queda únicamente como red de seguridad por si la cadena se rompe.
+
+Ventaja extra: dentro de una misma corrida el estado son archivos locales, así que la lógica de "2 fallos seguidos" funciona sin depender del cache. El cache solo enlaza una corrida con la siguiente.
 
 Dos detalles que no son obvios y que están resueltos en los workflows:
 

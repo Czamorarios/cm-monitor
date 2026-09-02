@@ -1,23 +1,54 @@
 name: Monitoreo CMillonario
 
-# Cada 5 minutos. En repositorios PUBLICOS GitHub Actions no cobra minutos, por eso
-# se puede a esta frecuencia. GitHub puede retrasar los crones unos minutos en horas
-# de mucha carga; es normal y esperado.
+# ─────────────────────────────────────────────────────────────────────────────
+# POR QUE UN BUCLE Y NO UN CRON DE 5 MINUTOS
+#
+# Medido en este repositorio el 2026-09-02: con `cron: */5 * * * *` GitHub
+# disparo 4 corridas en 17 horas, con intervalos reales de 235, 307 y 282
+# minutos. Es decir, el cron corrio cada 4-5 HORAS, no cada 5 minutos. GitHub
+# documenta que los workflows programados se retrasan bajo carga, y en la
+# practica los intervalos cortos son inservibles.
+#
+# La salida: como este repositorio es PUBLICO, GitHub Actions no cobra minutos.
+# Entonces en vez de pedirle a GitHub que nos despierte, mantenemos un trabajo
+# vivo que revisa cada 5 minutos durante ~5 horas y al terminar se vuelve a
+# lanzar solo. El cron queda unicamente como red de seguridad por si la cadena
+# se rompe.
+#
+# Ventaja extra: dentro de una misma corrida el estado son archivos locales, asi
+# que la logica de "2 fallos seguidos" y "avisar solo en transicion" funciona sin
+# depender del cache. El cache solo hace falta para enlazar una corrida con la
+# siguiente.
+# ─────────────────────────────────────────────────────────────────────────────
+
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 * * * *'      # red de seguridad: reengancha si la cadena se corta
   workflow_dispatch:
+    inputs:
+      duracion_min:
+        description: 'Minutos que dura el bucle (max 330; el limite de GitHub son 6 h)'
+        required: false
+        default: '300'
+      intervalo_seg:
+        description: 'Segundos entre revisiones'
+        required: false
+        default: '300'
 
+# Un solo bucle vivo a la vez. GitHub mantiene como maximo UNA corrida en espera
+# por grupo, asi que el cron y el reenganche no acumulan cola: la siguiente
+# arranca justo cuando termina la actual, y la vigilancia queda continua.
 concurrency:
   group: monitoreo-cmillonario
   cancel-in-progress: false
 
 jobs:
-  revisar:
+  vigilar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 340
     permissions:
       contents: read
+      actions: write          # para volver a lanzarse al terminar
 
     steps:
       - uses: actions/checkout@v4
@@ -26,10 +57,6 @@ jobs:
         with:
           node-version: '24'
 
-      # El estado tiene que sobrevivir entre corridas. Sin el, la logica de
-      # "2 fallos seguidos" y "avisar solo en transicion" no funciona y el monitor
-      # repetiria la misma alerta cada 5 minutos.
-      # La clave nunca coincide a proposito: restore-keys agarra la mas reciente.
       - name: Recuperar el estado de la corrida anterior
         uses: actions/cache/restore@v4
         with:
@@ -38,32 +65,58 @@ jobs:
           restore-keys: |
             estado-
 
-      - name: Revisar la plataforma
+      - name: Vigilar en bucle
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NO_COLOR: '1'
+          DURACION_MIN: ${{ github.event.inputs.duracion_min || '300' }}
+          INTERVALO_SEG: ${{ github.event.inputs.intervalo_seg || '300' }}
         run: |
-          set +e
-          # --publico: aunque alguien deje aqui un checks.private.json, este workflow
-          # NUNCA ejecuta las revisiones sensibles. Cinturon y tirantes.
-          node monitor.mjs --publico > salida.txt 2>&1
-          codigo=$?
+          FIN=$(( $(date +%s) + DURACION_MIN * 60 ))
+          ciclo=0
+          fallos_monitor=0
 
-          # ─────────────────────────────────────────────────────────────────
-          # ESTE LOG ES PUBLICO. Cualquiera en internet puede leerlo.
-          # Por eso NO se imprime nada sobre el estado de la plataforma: el
-          # detalle de las revisiones se manda unicamente al grupo de Telegram.
-          # Publicar aqui "3 revisiones criticas en rojo" seria un tablero
-          # publico y en vivo de cuando la plataforma esta debil.
-          # ─────────────────────────────────────────────────────────────────
-          if [ $codigo -ge 2 ]; then
-            echo "El monitor fallo al ejecutarse (codigo $codigo). Ultimas lineas:"
-            tail -n 10 salida.txt
-            exit $codigo
-          fi
+          while [ "$(date +%s)" -lt "$FIN" ]; do
+            ciclo=$((ciclo + 1))
+            inicio=$(date +%s)
 
-          echo "Revision completada. El detalle se envio por Telegram."
+            set +e
+            # --publico: aunque alguien deje aqui un checks.private.json, este
+            # workflow NUNCA ejecuta las revisiones sensibles.
+            node monitor.mjs --publico > salida.txt 2>&1
+            codigo=$?
+            set -e
+
+            # ─────────────────────────────────────────────────────────────────
+            # ESTE LOG ES PUBLICO. No se imprime nada sobre el estado de la
+            # plataforma: el detalle va solo al grupo de Telegram. Publicar aqui
+            # los resultados seria un tablero publico y en vivo de cuando el
+            # sitio esta degradado.
+            # ─────────────────────────────────────────────────────────────────
+            if [ "$codigo" -ge 2 ]; then
+              fallos_monitor=$((fallos_monitor + 1))
+              echo "[ciclo $ciclo] el monitor fallo al ejecutarse (codigo $codigo)"
+              tail -n 10 salida.txt
+              # Si el monitor esta roto de verdad, no tiene sentido seguir 5 horas
+              # gastando ciclos: se corta para que el reenganche traiga el arreglo.
+              if [ "$fallos_monitor" -ge 5 ]; then
+                echo "5 fallos del propio monitor: se corta el bucle."
+                break
+              fi
+            else
+              echo "[ciclo $ciclo] revision completada"
+            fi
+
+            # Descontar lo que tardo la revision, para que el ritmo sea estable.
+            tardo=$(( $(date +%s) - inicio ))
+            espera=$(( INTERVALO_SEG - tardo ))
+            [ "$espera" -lt 10 ] && espera=10
+            [ "$(date +%s)" -ge "$FIN" ] && break
+            sleep "$espera"
+          done
+
+          echo "Ciclos completados: $ciclo"
 
       - name: Guardar el estado para la siguiente corrida
         if: always()
@@ -71,3 +124,11 @@ jobs:
         with:
           path: state
           key: estado-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Reengancha la cadena. Sin esto dependeriamos del cron, que en este
+      # repositorio se dispara cada 4-5 horas.
+      - name: Volver a lanzar el bucle
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run monitor.yml --ref main

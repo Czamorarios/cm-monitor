@@ -786,13 +786,16 @@ function construirRevisiones(cfg) {
 
         const cab = d.availableDraws?.lnResponseSD?.responseHeadOV || {};
         const sorteos = d.availableDraws?.lnResponseSD?.sorteo || [];
-        const problemas = [];
 
-        if (d.isActual === false) problemas.push('la lista esta marcada como NO actual (isActual=false)');
+        // Se separan los problemas: no vale lo mismo "no hay nada que vender" que
+        // "la lista lleva rato sin refrescarse pero sigue siendo valida".
+        const graves = [], leves = [];
+
+        if (d.isActual === false) graves.push('la lista esta marcada como NO actual (isActual=false)');
 
         const esperado = t.respuestaEsperada || 'disponible';
         if (cab.respCodeDescription && !String(cab.respCodeDescription).includes(esperado))
-          problemas.push(`Loteria Nacional responde "${String(cab.respCodeDescription).slice(0, 70)}"`);
+          graves.push(`Loteria Nacional responde "${String(cab.respCodeDescription).slice(0, 70)}"`);
 
         const futuros = sorteos.filter((s) => {
           const f = Date.parse(String(s.fechaCelebracion) + 'T23:59:59Z');
@@ -800,19 +803,22 @@ function construirRevisiones(cfg) {
         });
         const minimo = t.minimoDisponibles ?? 1;
         if (futuros.length < minimo)
-          problemas.push(`solo ${futuros.length} sorteo(s) con fecha futura (minimo ${minimo}) -> no hay que vender`);
+          graves.push(`solo ${futuros.length} sorteo(s) con fecha futura (minimo ${minimo}) -> no hay que vender`);
 
+        // La frescura es señal de que el proceso que alimenta la lista sigue vivo,
+        // pero mientras haya sorteos con fecha futura SI se puede vender. Por eso
+        // es aviso, no critico.
         const act = Date.parse(d.updatedAt);
         if (!Number.isNaN(act)) {
           const horas = (Date.now() - act) / 3600000;
-          if (horas > (t.frescuraHoras ?? 6))
-            problemas.push(`la lista no se actualiza desde hace ${horas.toFixed(1)}h (limite ${t.frescuraHoras ?? 6}h)`);
+          const limite = t.frescuraHoras ?? 26;
+          if (horas > limite) leves.push(`la lista no se refresca desde hace ${horas.toFixed(1)}h (limite ${limite}h)`);
         }
 
         const muestra = futuros.slice(0, 3).map((s) => `${s.nombreSorteo} #${s.numeroSorteo} (${s.fechaCelebracion})`).join(', ');
-        return problemas.length
-          ? { ok: false, detalle: problemas.join(' | '), ms: r.ms }
-          : { ok: true, detalle: `${futuros.length} sorteos en venta: ${muestra}${futuros.length > 3 ? '...' : ''}`, ms: r.ms };
+        if (graves.length) return { ok: false, detalle: graves.concat(leves).join(' | '), ms: r.ms };
+        if (leves.length) return { ok: false, sev: 'aviso', detalle: `${futuros.length} sorteos siguen en venta, pero ${leves.join(' | ')}`, ms: r.ms };
+        return { ok: true, detalle: `${futuros.length} sorteos en venta: ${muestra}${futuros.length > 3 ? '...' : ''}`, ms: r.ms };
       },
     });
   }

@@ -242,9 +242,10 @@
       "doc": "drawsAvailables/currentAvailableDraws",
       "sev": "critico",
       "minimoDisponibles": 1,
-      "frescuraHoras": 6,
+      "frescuraHoras": 26,
       "respuestaEsperada": "disponible",
-      "_nota": "Misma fuente que usa la app para el modulo Elige una o varias fechas. Publica. Verifica que haya sorteos con fecha futura, que Loteria Nacional responda que hay disponibles, que la lista este marcada como actual y que se siga refrescando."
+      "_nota": "Misma fuente que usa la app para el modulo Elige una o varias fechas. Publica. Verifica que haya sorteos con fecha futura, que Loteria Nacional responda que hay disponibles, que la lista este marcada como actual y que se siga refrescando.",
+      "_notaFrescura": "Observado el 2026-09-02: el documento se refresca cada varias horas (se vieron 18:01 y 00:01 CDMX, y luego un hueco de 10.5 h), no cada hora. 26 h cubre un ciclo diario con holgura. Si el proceso que alimenta la lista deja de correr, la frescura avisa; mientras haya sorteos con fecha futura se puede vender, por eso es aviso y no critico."
     }
   },
   "ventanas": {
