@@ -89,6 +89,27 @@ function cargarConfig({ soloPublico = false } = {}) {
   base._perfil = 'publico';
   if (soloPublico) return base;
 
+  // 1) Entregada por variable de entorno. Es como llega en la nube: guardada como
+  //    secreto del repositorio, en base64 para que sea una sola linea (asi GitHub
+  //    la enmascara de forma fiable en los logs y no hay lios con saltos de linea).
+  //    El secreto NO se expone por ser publico el repositorio, y GitHub no se lo
+  //    entrega a los workflows que vengan de un fork ajeno.
+  const enEntorno = process.env.CM_CONFIG_PRIVADA_B64 || process.env.CM_CONFIG_PRIVADA;
+  if (enEntorno) {
+    try {
+      const texto = process.env.CM_CONFIG_PRIVADA_B64
+        ? Buffer.from(process.env.CM_CONFIG_PRIVADA_B64, 'base64').toString('utf8')
+        : process.env.CM_CONFIG_PRIVADA;
+      const priv = JSON.parse(texto);
+      base._perfil = 'publico+privado (entorno)';
+      return mezclar(base, priv, true);
+    } catch (e) {
+      // Ni el mensaje ni la traza incluyen el contenido: solo que no se pudo leer.
+      console.error(`AVISO: hay configuracion privada en el entorno pero no se pudo interpretar (${e.message}). Se sigue solo con el perfil publico.`);
+    }
+  }
+
+  // 2) Como archivo, que es la forma comoda en local.
   const candidatos = [
     process.env.CM_MONITOR_PRIVADO,
     join(RAIZ, 'checks.private.json'),

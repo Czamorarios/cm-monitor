@@ -69,9 +69,21 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Configuracion privada entregada como secreto, en base64. No esta en este
+          # repositorio. Los secretos NO se exponen por ser publico el repositorio, y
+          # GitHub no se los entrega a los workflows que vengan de un fork ajeno.
+          CM_CONFIG_PRIVADA_B64: ${{ secrets.CM_CONFIG_PRIVADA_B64 }}
+          CM_USUARIO_PRUEBA: ${{ secrets.CM_USUARIO_PRUEBA }}
+          CM_PASSWORD_PRUEBA: ${{ secrets.CM_PASSWORD_PRUEBA }}
           NO_COLOR: '1'
           DURACION_MIN: ${{ github.event.inputs.duracion_min || '300' }}
           INTERVALO_SEG: ${{ github.event.inputs.intervalo_seg || '300' }}
+          # Cada cuantos ciclos se corre tambien el perfil privado. Con intervalo de
+          # 5 min, 6 ciclos = cada 30 min. Las revisiones privadas consultan el
+          # backend de juego iniciando sesion, y no conviene hacerlo cada 5 minutos:
+          # ni hace falta (son fallos que se mueven en horas) ni es sano para ese
+          # backend, que ya flaquea cuando le llegan varias consultas juntas.
+          CICLOS_PROFUNDO: '6'
         run: |
           FIN=$(( $(date +%s) + DURACION_MIN * 60 ))
           ciclo=0
@@ -81,10 +93,18 @@ jobs:
             ciclo=$((ciclo + 1))
             inicio=$(date +%s)
 
+            # Ciclo profundo: perfil completo (publico + privado).
+            # Resto de ciclos: --publico, que ignora la configuracion privada.
+            # El estado de una revision que no corre en un ciclo se conserva intacto,
+            # asi que mezclar las dos cadencias no altera la logica de alertas.
+            if [ $(( (ciclo - 1) % CICLOS_PROFUNDO )) -eq 0 ]; then
+              modo="completo"; args=""
+            else
+              modo="publico"; args="--publico"
+            fi
+
             set +e
-            # --publico: aunque alguien deje aqui un checks.private.json, este
-            # workflow NUNCA ejecuta las revisiones sensibles.
-            node monitor.mjs --publico > salida.txt 2>&1
+            node monitor.mjs $args > salida.txt 2>&1
             codigo=$?
             set -e
 
@@ -96,7 +116,7 @@ jobs:
             # ─────────────────────────────────────────────────────────────────
             if [ "$codigo" -ge 2 ]; then
               fallos_monitor=$((fallos_monitor + 1))
-              echo "[ciclo $ciclo] el monitor fallo al ejecutarse (codigo $codigo)"
+              echo "[ciclo $ciclo/$modo] el monitor fallo al ejecutarse (codigo $codigo)"
               tail -n 10 salida.txt
               # Si el monitor esta roto de verdad, no tiene sentido seguir 5 horas
               # gastando ciclos: se corta para que el reenganche traiga el arreglo.
@@ -105,7 +125,7 @@ jobs:
                 break
               fi
             else
-              echo "[ciclo $ciclo] revision completada"
+              echo "[ciclo $ciclo/$modo] revision completada"
             fi
 
             # Descontar lo que tardo la revision, para que el ritmo sea estable.

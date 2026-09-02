@@ -92,15 +92,46 @@ Dos detalles que no son obvios y que están resueltos en los workflows:
 
 ### Los logs de este repositorio son públicos
 
-Los workflows **no imprimen nada sobre el estado de la plataforma**. Todo el detalle va únicamente al grupo de Telegram; el log público solo dice si el monitor pudo ejecutarse. Publicar los resultados aquí sería un tablero público y en vivo de cuándo el sitio está degradado.
+Los workflows **no imprimen nada sobre el estado de la plataforma**. Todo el detalle va únicamente al grupo de Telegram; el log público solo dice `[ciclo N/modo] revision completada`. Publicar los resultados aquí sería un tablero público y en vivo de cuándo el sitio está degradado.
 
 Si modificas los workflows, **no agregues `cat` de la salida ni `GITHUB_STEP_SUMMARY`** con los resultados.
 
+### Las dos cadencias del bucle
+
+El bucle alterna dos modos:
+
+| Ciclo | Modo | Qué corre | Cada cuánto |
+|---|---|---|---|
+| 1 de cada 6 | completo | público + privado | 30 min |
+| los otros 5 | `--publico` | solo el perfil público | 5 min |
+
+Las revisiones privadas consultan el backend de juego iniciando sesión, y no conviene hacerlo cada 5 minutos: ni hace falta —son fallos que se mueven en horas— ni es sano para ese backend, que ya flaquea cuando le llegan varias consultas juntas.
+
+El estado de una revisión que no corre en un ciclo **se conserva intacto**, así que mezclar las dos cadencias no altera la lógica de "2 fallos seguidos" ni la de avisar solo en transición.
+
+`--publico` sigue mandando por encima del secreto: fuerza el perfil público aunque haya configuración privada disponible.
+
 ## Perfil privado
 
-El monitor admite un segundo archivo de configuración, `checks.private.json`, que **no está en este repositorio** y no debe estarlo. Si existe, se suma al perfil público (los arreglos se concatenan) y habilita revisiones adicionales que no son apropiadas para un repositorio abierto.
+El monitor admite una segunda configuración, `checks.private.json`, que **no está en este repositorio** y no debe estarlo. Si existe, se suma al perfil público (los arreglos se concatenan) y habilita revisiones que no son apropiadas para un repositorio abierto.
 
-Se busca en este orden: la variable de entorno `CM_MONITOR_PRIVADO`, luego junto al programa, luego `../cm-monitor-privado/`. Si no aparece, el monitor corre en modo público sin más.
+Llega por dos vías:
+
+1. **Como secreto**, que es la forma en que corre en la nube: `CM_CONFIG_PRIVADA_B64` con el JSON en base64. Se usa base64 para que sea una sola línea, así GitHub la enmascara de forma fiable en los logs y no hay problemas con saltos de línea.
+2. **Como archivo**, que es lo cómodo en local: se busca en `CM_MONITOR_PRIVADO`, luego junto al programa, luego `../cm-monitor-privado/`.
+
+Si no aparece por ninguna vía, el monitor corre en modo público sin más. Si aparece pero está corrupta, lo avisa por la salida de error y sigue en modo público, en vez de romperse en silencio.
+
+### Qué protege al secreto en un repositorio público
+
+Esto merece ser explícito, porque es la decisión de diseño con más superficie de confianza de todo el proyecto:
+
+- Los secretos **no se exponen** por que el repositorio sea público. No aparecen en el código, ni en la interfaz, ni en los logs.
+- GitHub **no entrega los secretos a los workflows que vengan de un fork ajeno**. Alguien que abra un pull request malicioso no puede leerlos.
+- GitHub **enmascara** el valor de un secreto si algo lo imprime por accidente.
+- Lo que sí puede leerlos es un workflow de este repositorio en la rama por defecto. Es decir: **quien tenga permiso de escritura aquí, puede leer el secreto.** Hoy eso es una sola persona.
+
+El secreto contiene configuración sensible (el mapa de las funciones de dinero y las reglas de acceso esperadas), no credenciales de la plataforma. Las credenciales de la cuenta de prueba son secretos aparte, y esa cuenta tiene saldo cero y sin método de pago.
 
 Para verificar qué hace exactamente la versión pública, aunque tengas el archivo privado en tu máquina:
 
