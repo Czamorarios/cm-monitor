@@ -833,10 +833,22 @@ function construirRevisiones(cfg) {
       nombre: `Sorteo disponible: ${j.que || j.product}`,
       omitirEn: j.omitirEn ?? 'ventaElectronicosCerrada',
       async run() {
-        const r = await llamarConSesion(cfg, j.funcion || 'getgameinfofunction',
-          { product: j.product }, 'POST', j.ruta || '/getGameInfo');
-        if (r.error) return { ok: false, detalle: r.error, ms: r.ms };
-        if (r.code !== 200) return { ok: false, detalle: `la informacion de juego respondio HTTP ${r.code}`, ms: r.ms };
+        // El backend de juego devuelve 504 de vez en cuando (medido: ~13% de las
+        // llamadas, y solo cuando varias salen a la vez; aislada respondio 8 de 8).
+        // Sin reintento, dos de esos seguidos generarian una alerta falsa casi a
+        // diario. Es una lectura, asi que repetirla no tiene ningun efecto.
+        const intentos = (j.reintentos ?? cfg.juegos?.reintentosSorteo ?? 1) + 1;
+        let r, repeticiones = 0;
+        for (let i = 0; i < intentos; i++) {
+          r = await llamarConSesion(cfg, j.funcion || 'getgameinfofunction',
+            { product: j.product }, 'POST', j.ruta || '/getGameInfo');
+          if (!(r.code === 0 || r.code >= 500)) break;
+          if (i < intentos - 1) { repeticiones++; await new Promise((res) => setTimeout(res, 1500)); }
+        }
+        const nota = repeticiones ? ` (tras ${repeticiones} reintento${repeticiones > 1 ? 's' : ''})` : '';
+
+        if (r.error) return { ok: false, detalle: r.error + nota, ms: r.ms };
+        if (r.code !== 200) return { ok: false, detalle: `la informacion de juego respondio HTTP ${r.code}${nota}`, ms: r.ms };
 
         const lista = r.datos?.getGameInfoReturn?.getGameInfoReturn;
         if (!Array.isArray(lista)) return { ok: false, detalle: 'respuesta sin la informacion de juego esperada', ms: r.ms };
@@ -856,7 +868,7 @@ function construirRevisiones(cfg) {
         if (h != null && f < h)
           return { ok: false, detalle: `el sorteo #${numero} es del ${fecha}, anterior a la fecha del servidor (${hoy}) -> no se cargo el siguiente`, ms: r.ms };
 
-        return { ok: true, detalle: `sorteo #${numero} para el ${fecha}`, ms: r.ms };
+        return { ok: true, detalle: `sorteo #${numero} para el ${fecha}${nota}`, ms: r.ms };
       },
     });
   }
