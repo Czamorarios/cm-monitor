@@ -15,6 +15,7 @@ node monitor.mjs
 | `node monitor.mjs` | Corrida completa (capas 1, 2 y 3) |
 | `node monitor.mjs --capa 1` | Solo disponibilidad (más rápido) |
 | `node monitor.mjs --publico` | Fuerza el perfil público, ignorando cualquier configuración local |
+| `node monitor.mjs --solo-privado` | Ejecuta **solo** las revisiones que aporta el perfil privado, sin repetir las públicas |
 | `node monitor.mjs --dry-run` | Revisa pero **no** manda alertas |
 | `node monitor.mjs --prueba` | Valida el token de Telegram y manda un mensaje de ejemplo |
 | `node monitor.mjs --chatid` | Lista los chats que conoce el bot, para encontrar el id de un grupo |

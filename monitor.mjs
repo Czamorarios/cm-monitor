@@ -102,14 +102,25 @@ function cargarConfig({ soloPublico = false } = {}) {
   if (!priv) return base;
   base._perfil = 'publico+privado';
   base._rutaPrivada = ruta;
-  return mezclar(base, priv);
+  return mezclar(base, priv, true);
 }
 
-function mezclar(a, b) {
+/**
+ * Mezcla la configuracion privada sobre la publica. Cada entrada que venga del
+ * perfil privado se marca con _priv, para que las revisiones que genera se puedan
+ * ejecutar por separado (--solo-privado). Asi el monitoreo privado no repite lo que
+ * el publico ya vigila, y no llegan alertas duplicadas al mismo grupo.
+ */
+function mezclar(a, b, marcar = false) {
   for (const [k, v] of Object.entries(b)) {
-    if (Array.isArray(v)) a[k] = [...(Array.isArray(a[k]) ? a[k] : []), ...v];
-    else if (v && typeof v === 'object') a[k] = mezclar(a[k] && typeof a[k] === 'object' ? a[k] : {}, v);
-    else a[k] = v;
+    if (Array.isArray(v)) {
+      const items = marcar
+        ? v.map((x) => (x && typeof x === 'object' && !Array.isArray(x) ? { ...x, _priv: true } : x))
+        : v;
+      a[k] = [...(Array.isArray(a[k]) ? a[k] : []), ...items];
+    } else if (v && typeof v === 'object') {
+      a[k] = mezclar(a[k] && typeof a[k] === 'object' ? a[k] : {}, v, marcar);
+    } else a[k] = v;
   }
   return a;
 }
@@ -497,7 +508,7 @@ function construirRevisiones(cfg) {
   // ═══════════ CAPA 2 — BACKEND Y DEPENDENCIAS ═══════════
 
   const revisarFuncion = (plantilla, def, gen) => ({
-    id: `fn_${def.f.toLowerCase()}`, capa: 2, sev: def.sev,
+    id: `fn_${def.f.toLowerCase()}`, capa: 2, sev: def.sev, privada: def._priv === true,
     nombre: `Funcion ${gen} ${def.f} (${def.que})`,
     async run() {
       // SOLO GET sin cuerpo: no puede mover dinero ni crear registros.
@@ -548,7 +559,7 @@ function construirRevisiones(cfg) {
   for (const c of cfg.firestore?.accesoEsperado ?? []) {
     const esperado = Number(c.http) || 200;
     add({
-      id: `fs_acceso_${c.col}`, capa: 2, sev: c.sev || 'critico',
+      id: `fs_acceso_${c.col}`, capa: 2, sev: c.sev || 'critico', privada: c._priv === true,
       nombre: `Firestore ${c.col}: acceso esperado ${esperado}${c.que ? ' (' + c.que + ')' : ''}`,
       async run() {
         const r = await fsListar(cfg, c.col, 1);
@@ -818,7 +829,7 @@ function construirRevisiones(cfg) {
   const hayCredenciales = Boolean((process.env.CM_USUARIO_PRUEBA || '').trim() && process.env.CM_PASSWORD_PRUEBA);
   for (const j of (hayCredenciales ? cfg.juegos?.sorteoAbierto ?? [] : [])) {
     add({
-      id: `neg_abierto_${j.product}`, capa: 3, sev: j.sev || 'critico',
+      id: `neg_abierto_${j.product}`, capa: 3, sev: j.sev || 'critico', privada: j._priv === true,
       nombre: `Sorteo disponible: ${j.que || j.product}`,
       omitirEn: j.omitirEn ?? 'ventaElectronicosCerrada',
       async run() {
@@ -888,7 +899,10 @@ async function enTandas(items, n, fn) {
 async function correr(cfg, capas, opciones) {
   const desactivadas = new Set(cfg.desactivadas?.ids || []);
   const revisiones = construirRevisiones(cfg)
-    .filter((r) => capas.includes(r.capa) && !desactivadas.has(r.id));
+    .filter((r) => capas.includes(r.capa) && !desactivadas.has(r.id))
+    // --solo-privado: unicamente las revisiones que aporta el perfil privado, para
+    // que el monitoreo privado no repita lo que ya vigila el publico.
+    .filter((r) => !opciones.soloPrivado || r.privada === true);
   const ctx = {};
   const concurrencia = cfg.umbrales.concurrencia || 8;
 
@@ -916,7 +930,7 @@ async function correr(cfg, capas, opciones) {
   return { resultados, ctx };
 }
 
-const meta = (r) => ({ id: r.id, capa: r.capa, nombre: r.nombre, sev: r.sev });
+const meta = (r) => ({ id: r.id, capa: r.capa, nombre: r.nombre, sev: r.sev, privada: r.privada === true });
 
 function evaluarEstado(cfg, resultados, opciones) {
   const estado = leerJson(F_STATUS, { checks: {}, ultimaCorrida: null });
@@ -1430,7 +1444,7 @@ async function main() {
   }
 
   const capas = (valor('--capa') || '1,2,3').split(',').map(Number).filter((n) => [1, 2, 3].includes(n));
-  const opciones = { dryRun: tiene('--dry-run'), json: tiene('--json') };
+  const opciones = { dryRun: tiene('--dry-run'), json: tiene('--json'), soloPrivado: tiene('--solo-privado') };
 
   // Las capas 2 y 3 necesitan el projectId y la API key publica, que se leen
   // en vivo del sitio si la configuracion no los trae (caso del repo publico).
