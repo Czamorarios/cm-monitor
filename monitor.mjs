@@ -277,6 +277,65 @@ function plano(doc) {
   return o;
 }
 
+// ─────────────────────────── sesion de solo lectura ───────────────────────────
+
+/**
+ * Algunos datos de juego (que sorteo esta abierto y hasta cuando se vende) no son
+ * legibles sin sesion: la funcion de catalogo exige un token de Firebase y el
+ * proyecto tiene deshabilitada la sesion anonima. Para eso se usa una CUENTA DE
+ * PRUEBA dedicada, con saldo cero y sin metodo de pago.
+ *
+ * Las credenciales SOLO llegan por variables de entorno (.env en local, secretos
+ * del repositorio en la nube). Nunca se escriben en disco, nunca se imprimen, y
+ * nunca viajan al repositorio publico: las revisiones que las usan viven en el
+ * perfil privado. Si no hay credenciales, esas revisiones sencillamente no existen.
+ */
+let _sesion = null;
+
+async function sesionDePrueba(cfg) {
+  if (_sesion && _sesion.idToken && _sesion.expira > Date.now() + 60000) return _sesion;
+
+  const correo = (process.env.CM_USUARIO_PRUEBA || '').trim();
+  const clave = process.env.CM_PASSWORD_PRUEBA || '';
+  if (!correo || !clave) return null;
+
+  if (!await asegurarFirebase(cfg)) return { error: 'no se pudo obtener la configuracion de Firebase del sitio' };
+
+  const r = await pedir(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.firebase.apiKeyPublica}`, {
+    metodo: 'POST', headers: { 'Content-Type': 'application/json' },
+    timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true,
+    cuerpo: JSON.stringify({ email: correo, password: clave, returnSecureToken: true }),
+  });
+
+  if (!r.ok || r.code !== 200) {
+    let motivo = r.error || `HTTP ${r.code}`;
+    try { motivo = JSON.parse(r.texto).error?.message || motivo; } catch { /* ignorar */ }
+    _sesion = { error: motivo };          // nunca se guarda la clave ni el token
+    return _sesion;
+  }
+  try {
+    const j = JSON.parse(r.texto);
+    _sesion = { idToken: j.idToken, expira: Date.now() + (Number(j.expiresIn || 3600) - 60) * 1000 };
+    return _sesion;
+  } catch { return (_sesion = { error: 'respuesta de sesion no interpretable' }); }
+}
+
+/** Llama una funcion del backend con la sesion de prueba. Devuelve {code, datos}. */
+async function llamarConSesion(cfg, funcion, cuerpo) {
+  const s = await sesionDePrueba(cfg);
+  if (!s) return { code: 0, error: 'sin credenciales de la cuenta de prueba' };
+  if (s.error) return { code: 0, error: `no se pudo iniciar sesion: ${s.error}` };
+  const r = await pedir(cfg.funciones.plantillaGen2.replace('{f}', funcion), {
+    metodo: 'POST', timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 200000,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.idToken}` },
+    cuerpo: JSON.stringify(cuerpo || {}),
+  });
+  if (!r.ok) return { code: 0, error: r.error, ms: r.ms };
+  let datos = null;
+  try { datos = JSON.parse(r.texto); } catch { /* puede no ser JSON */ }
+  return { code: r.code, datos, texto: r.texto, ms: r.ms };
+}
+
 // ─────────────────────────── definicion de revisiones ───────────────────────────
 
 /**
@@ -859,6 +918,73 @@ async function chatid() {
 `));
 }
 
+/**
+ * --explorar-juegos : con la cuenta de prueba, averigua que devuelve la funcion de
+ * catalogo para cada juego. Sirve para escribir las revisiones sobre datos reales
+ * en vez de suponer. No manda nada a Telegram y no escribe estado.
+ */
+async function explorarJuegos(cfg, juegos) {
+  console.log('\n  ' + C.fuerte('Exploracion del catalogo de juego (requiere cuenta de prueba)'));
+  console.log(C.gris('  ' + '─'.repeat(76)));
+
+  const s = await sesionDePrueba(cfg);
+  if (!s) {
+    console.log(C.ama(`
+  Faltan las credenciales de la cuenta de prueba. En el archivo .env agrega:
+
+      CM_USUARIO_PRUEBA=correo-de-la-cuenta-de-prueba
+      CM_PASSWORD_PRUEBA=su-contrasena
+
+  Archivo: ${join(RAIZ, '.env')}
+  Usa una cuenta DEDICADA, con saldo cero y sin metodo de pago.
+`));
+    process.exitCode = 2; return;
+  }
+  if (s.error) {
+    console.log(C.rojo(`\n  No se pudo iniciar sesion: ${s.error}`));
+    const pistas = {
+      EMAIL_NOT_FOUND: 'ese correo no esta registrado en la plataforma',
+      INVALID_PASSWORD: 'la contrasena no coincide',
+      INVALID_LOGIN_CREDENTIALS: 'correo o contrasena incorrectos',
+      USER_DISABLED: 'la cuenta esta deshabilitada',
+      TOO_MANY_ATTEMPTS_TRY_LATER: 'demasiados intentos; espera un rato',
+    };
+    for (const [k, v] of Object.entries(pistas)) if (String(s.error).includes(k)) console.log(C.gris(`  (${v})`));
+    console.log('');
+    process.exitCode = 2; return;
+  }
+  console.log(C.verde('\n  Sesion iniciada correctamente.\n'));
+
+  // No se sabe de antemano como espera los parametros la funcion: se prueban varias
+  // formas y se reporta cual responde 200.
+  const formas = (g) => ([
+    ['sin cuerpo', {}],
+    ['game', { game: g }],
+    ['gameName', { gameName: g }],
+    ['product', { product: g }],
+    ['name', { name: g }],
+  ]);
+
+  for (const g of juegos) {
+    console.log(C.fuerte(`  ── ${g}`));
+    for (const [etiqueta, cuerpo] of formas(g)) {
+      const r = await llamarConSesion(cfg, 'getgameinfofunction', cuerpo);
+      const marca = r.code === 200 ? C.verde('200') : C.gris(String(r.code || 'error'));
+      let resumen = r.error || '';
+      if (r.datos && typeof r.datos === 'object') {
+        const claves = Array.isArray(r.datos) ? `[array de ${r.datos.length}]` : Object.keys(r.datos).join(', ');
+        resumen = claves.slice(0, 150);
+      } else if (r.texto) resumen = String(r.texto).slice(0, 110);
+      console.log(`     ${marca}  ${etiqueta.padEnd(11)} ${C.gris(resumen)}`);
+      if (r.code === 200) {
+        console.log(C.gris('           contenido: ' + JSON.stringify(r.datos).slice(0, 700)));
+        break;
+      }
+    }
+  }
+  console.log(C.gris('\n  Con esto puedo escribir la revision de "hay concurso vendible" sobre el dato real.\n'));
+}
+
 /** --prueba : manda a Telegram un ejemplo de como se ven las alertas de verdad. */
 async function prueba(cfg) {
   console.log('\n  ' + C.fuerte('Prueba de alertas por Telegram'));
@@ -1158,6 +1284,11 @@ async function main() {
   }
   if (tiene('--prueba')) { await prueba(cfg); return; }
   if (tiene('--chatid')) { await chatid(); return; }
+  if (tiene('--explorar-juegos')) {
+    const lista = (valor('--juegos') || 'Melate,MelateRetro,Chispazo,Tris,GanaGato,MiProgol').split(',').map((x) => x.trim()).filter(Boolean);
+    await explorarJuegos(cfg, lista);
+    return;
+  }
 
   const capas = (valor('--capa') || '1,2,3').split(',').map(Number).filter((n) => [1, 2, 3].includes(n));
   const opciones = { dryRun: tiene('--dry-run'), json: tiene('--json') };
