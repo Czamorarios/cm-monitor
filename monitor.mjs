@@ -208,6 +208,12 @@ function fechaFlexible(v) {
   return Date.UTC(+m[3], mes, +m[2], h, +m[5], +(m[6] || 0)) - (m[8] ? Number(m[8]) : 0) * 3600000;
 }
 
+/** "01/09/2026" -> 20260901, para comparar fechas sin lios de zona horaria. */
+function fechaDMY(s) {
+  const m = String(s || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return m ? Number(m[3] + m[2] + m[1]) : null;
+}
+
 /** Peticion HTTP medida. Nunca lanza: los errores vienen en el resultado. */
 async function pedir(url, opciones = {}) {
   const { metodo = 'GET', timeoutMs = 20000, leerCuerpo = false, maxBytes = 300000, cuerpo = null, headers = {} } = opciones;
@@ -251,6 +257,27 @@ const fsUrl = (cfg, ruta) =>
 async function fsListar(cfg, col, pageSize = 1) {
   return pedir(`${fsUrl(cfg, '/' + col)}?key=${cfg.firebase.apiKeyPublica}&pageSize=${pageSize}`,
     { timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true });
+}
+
+/** Lee un documento concreto: ruta tipo "coleccion/documento". */
+async function fsDocumento(cfg, ruta) {
+  return pedir(`${fsUrl(cfg, '/' + ruta)}?key=${cfg.firebase.apiKeyPublica}`,
+    { timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 400000 });
+}
+
+/** Desenvuelve el JSON de Firestore (mapValue/arrayValue/xxxValue) a datos normales. */
+function desenvolver(v) {
+  if (v == null) return v;
+  const t = Object.keys(v)[0];
+  if (t === 'mapValue') {
+    const o = {};
+    for (const [k, x] of Object.entries(v.mapValue.fields || {})) o[k] = desenvolver(x);
+    return o;
+  }
+  if (t === 'arrayValue') return (v.arrayValue.values || []).map(desenvolver);
+  if (t === 'integerValue') return Number(v[t]);
+  if (t === 'nullValue') return null;
+  return v[t];
 }
 
 async function fsConsulta(cfg, col, campoOrden, limite) {
@@ -324,12 +351,12 @@ async function sesionDePrueba(cfg) {
  * Llama una funcion del backend con la sesion de prueba.
  * Estas rutas son GET y llevan los parametros en la URL (con POST responden 405).
  */
-async function llamarConSesion(cfg, funcion, params = null, metodo = 'GET') {
+async function llamarConSesion(cfg, funcion, params = null, metodo = 'GET', ruta = '') {
   const s = await sesionDePrueba(cfg);
   if (!s) return { code: 0, error: 'sin credenciales de la cuenta de prueba' };
   if (s.error) return { code: 0, error: `no se pudo iniciar sesion: ${s.error}` };
 
-  let url = cfg.funciones.plantillaGen2.replace('{f}', funcion);
+  let url = cfg.funciones.plantillaGen2.replace('{f}', funcion) + (ruta || '');
   const cuerpo = metodo === 'GET' ? null : JSON.stringify(params || {});
   if (metodo === 'GET' && params && Object.keys(params).length) {
     url += '?' + new URLSearchParams(params).toString();
@@ -726,6 +753,103 @@ function construirRevisiones(cfg) {
     });
   }
 
+  /**
+   * Sorteos de la loteria tradicional disponibles para la venta (los cachitos).
+   * Es la fuente que usa la propia app para el modulo "Elige una o varias fechas":
+   * el documento trae la lista de sorteos con su numero y fecha de celebracion, mas
+   * el codigo de respuesta de Loteria Nacional. Es publico y se refresca cada hora.
+   */
+  if (cfg.juegos?.sorteosTradicionales) {
+    const t = cfg.juegos.sorteosTradicionales;
+    add({
+      id: 'neg_sorteos_disponibles', capa: 3, sev: t.sev || 'critico',
+      nombre: 'Sorteos tradicionales disponibles para la venta',
+      async run() {
+        const r = await fsDocumento(cfg, t.doc);
+        if (!r.ok) return { ok: false, detalle: r.error, ms: r.ms };
+        if (r.code !== 200) return { ok: false, detalle: `HTTP ${r.code} al leer ${t.doc}`, ms: r.ms };
+
+        let doc; try { doc = JSON.parse(r.texto); } catch { return { ok: false, detalle: 'respuesta no interpretable', ms: r.ms }; }
+        const d = {};
+        for (const [k, v] of Object.entries(doc.fields || {})) d[k] = desenvolver(v);
+
+        const cab = d.availableDraws?.lnResponseSD?.responseHeadOV || {};
+        const sorteos = d.availableDraws?.lnResponseSD?.sorteo || [];
+        const problemas = [];
+
+        if (d.isActual === false) problemas.push('la lista esta marcada como NO actual (isActual=false)');
+
+        const esperado = t.respuestaEsperada || 'disponible';
+        if (cab.respCodeDescription && !String(cab.respCodeDescription).includes(esperado))
+          problemas.push(`Loteria Nacional responde "${String(cab.respCodeDescription).slice(0, 70)}"`);
+
+        const futuros = sorteos.filter((s) => {
+          const f = Date.parse(String(s.fechaCelebracion) + 'T23:59:59Z');
+          return !Number.isNaN(f) && f > Date.now();
+        });
+        const minimo = t.minimoDisponibles ?? 1;
+        if (futuros.length < minimo)
+          problemas.push(`solo ${futuros.length} sorteo(s) con fecha futura (minimo ${minimo}) -> no hay que vender`);
+
+        const act = Date.parse(d.updatedAt);
+        if (!Number.isNaN(act)) {
+          const horas = (Date.now() - act) / 3600000;
+          if (horas > (t.frescuraHoras ?? 6))
+            problemas.push(`la lista no se actualiza desde hace ${horas.toFixed(1)}h (limite ${t.frescuraHoras ?? 6}h)`);
+        }
+
+        const muestra = futuros.slice(0, 3).map((s) => `${s.nombreSorteo} #${s.numeroSorteo} (${s.fechaCelebracion})`).join(', ');
+        return problemas.length
+          ? { ok: false, detalle: problemas.join(' | '), ms: r.ms }
+          : { ok: true, detalle: `${futuros.length} sorteos en venta: ${muestra}${futuros.length > 3 ? '...' : ''}`, ms: r.ms };
+      },
+    });
+  }
+
+  /**
+   * Juegos que deben tener SIEMPRE un sorteo disponible (salvo la ventana diaria en
+   * que se cierra la venta). Se comprueba lo mismo que verifica un usuario: que haya
+   * un numero de sorteo con su fecha. La fecha se compara contra la del propio
+   * servidor, que viene en la misma respuesta, para no depender del reloj del monitor
+   * ni de zonas horarias.
+   *
+   * Requiere sesion; si no hay credenciales, estas revisiones no se construyen.
+   */
+  const hayCredenciales = Boolean((process.env.CM_USUARIO_PRUEBA || '').trim() && process.env.CM_PASSWORD_PRUEBA);
+  for (const j of (hayCredenciales ? cfg.juegos?.sorteoAbierto ?? [] : [])) {
+    add({
+      id: `neg_abierto_${j.product}`, capa: 3, sev: j.sev || 'critico',
+      nombre: `Sorteo disponible: ${j.que || j.product}`,
+      omitirEn: j.omitirEn ?? 'ventaElectronicosCerrada',
+      async run() {
+        const r = await llamarConSesion(cfg, j.funcion || 'getgameinfofunction',
+          { product: j.product }, 'POST', j.ruta || '/getGameInfo');
+        if (r.error) return { ok: false, detalle: r.error, ms: r.ms };
+        if (r.code !== 200) return { ok: false, detalle: `la informacion de juego respondio HTTP ${r.code}`, ms: r.ms };
+
+        const lista = r.datos?.getGameInfoReturn?.getGameInfoReturn;
+        if (!Array.isArray(lista)) return { ok: false, detalle: 'respuesta sin la informacion de juego esperada', ms: r.ms };
+        const info = {};
+        for (const p of lista) info[p?.name?.$value ?? ''] = p?.value?.$value;
+
+        const numero = info[`${j.product}.draw.drawNumber`];
+        const fecha = info[`${j.product}.draw.drawDate`];
+        const hoy = info['System.control.date'];
+
+        if (numero == null || Number(numero) <= 0)
+          return { ok: false, detalle: 'no hay numero de sorteo disponible -> no se puede jugar', ms: r.ms };
+        if (!fecha) return { ok: false, detalle: `el sorteo #${numero} no trae fecha`, ms: r.ms };
+
+        const f = fechaDMY(fecha), h = fechaDMY(hoy);
+        if (f == null) return { ok: false, detalle: `la fecha del sorteo no es interpretable ("${fecha}")`, ms: r.ms };
+        if (h != null && f < h)
+          return { ok: false, detalle: `el sorteo #${numero} es del ${fecha}, anterior a la fecha del servidor (${hoy}) -> no se cargo el siguiente`, ms: r.ms };
+
+        return { ok: true, detalle: `sorteo #${numero} para el ${fecha}`, ms: r.ms };
+      },
+    });
+  }
+
   add({
     id: 'neg_lotenal', capa: 3, sev: 'critico',
     nombre: 'Resultados de Loteria tradicional (billetes/cachitos)',
@@ -975,46 +1099,29 @@ async function explorarJuegos(cfg, juegos) {
     return String(r.texto || '').slice(0, 120);
   };
 
-  // FASE 1 — descubrir el endpoint y el nombre del parametro. Las rutas son GET;
-  // con POST responden 405. Se prueba con un solo juego para no hacer ruido.
-  const muestra = juegos[0];
-  const candidatos = [
-    ['getgameinfofunction', null], ['getgameinfofunction', { game: muestra }],
-    ['getgameinfofunction', { gameName: muestra }], ['getgameinfofunction', { product: muestra }],
-    ['getgameinfofunction', { name: muestra }], ['getgameinfofunction', { id: muestra }],
-    ['draws', null], ['draws', { game: muestra }], ['draws', { product: muestra }],
-    ['prizes', null], ['prizes', { game: muestra }],
-  ];
+  // La llamada correcta salio del bundle de la propia app:
+  //   POST  https://getgameinfofunction-...run.app/getGameInfo   con  {product:"<Juego>"}
+  // La base respondia 405 porque la ruta real es el sub-camino /getGameInfo.
+  // La respuesta viene envuelta en getGameInfoReturn.getGameInfoReturn como una lista
+  // de pares {name:{$value}, value:{$value}} que la app aplana a un objeto.
+  const aplana = (datos) => {
+    const lista = datos?.getGameInfoReturn?.getGameInfoReturn;
+    if (!Array.isArray(lista)) return null;
+    const o = {};
+    for (const p of lista) o[p?.name?.$value ?? '?'] = p?.value?.$value;
+    return o;
+  };
 
-  console.log(C.fuerte(`  FASE 1 — buscando el endpoint correcto (muestra: ${muestra})\n`));
-  let bueno = null;
-  for (const [fn, params] of candidatos) {
-    const r = await llamarConSesion(cfg, fn, params);
-    const marca = r.code === 200 ? C.verde('200') : C.gris(String(r.code || 'err'));
-    const etiqueta = `${fn}${params ? '?' + Object.keys(params)[0] + '=' : ''}`;
-    console.log(`     ${marca}  ${etiqueta.padEnd(34)} ${C.gris(resumen(r))}`);
-    if (r.code === 200 && !bueno) { bueno = { fn, params }; console.log(C.verde('           ^ este responde')); }
-  }
-
-  if (!bueno) {
-    console.log(C.ama(`
-  Ninguna combinacion respondio 200. Pegame esta salida y sigo probando; puede
-  que la ruta lleve el juego en el camino (/algo/Melate) o que espere otro nombre
-  de parametro. Tambien sirve preguntarle al equipo como consulta la app el
-  estado del sorteo abierto.
-`));
-    return;
-  }
-
-  // FASE 2 — con la forma que funciona, se consulta cada juego.
-  console.log('\n  ' + C.fuerte(`FASE 2 — ${bueno.fn} para cada juego\n`));
   for (const g of juegos) {
-    const params = bueno.params ? { [Object.keys(bueno.params)[0]]: g } : null;
-    const r = await llamarConSesion(cfg, bueno.fn, params);
-    console.log(`  ── ${C.fuerte(g)}  ${r.code === 200 ? C.verde('200') : C.gris(String(r.code))}  ${C.gris((r.ms || 0) + ' ms')}`);
-    console.log(C.gris('     ' + JSON.stringify(r.datos ?? r.texto ?? r.error).slice(0, 900)));
+    const r = await llamarConSesion(cfg, 'getgameinfofunction', { product: g }, 'POST', '/getGameInfo');
+    const marca = r.code === 200 ? C.verde('200') : C.rojo(String(r.code || 'err'));
+    console.log(`  ── ${C.fuerte(g.padEnd(14))} ${marca}  ${C.gris((r.ms || 0) + ' ms')}`);
+    if (r.code !== 200) { console.log(C.gris('     ' + resumen(r))); continue; }
+    const plano = aplana(r.datos);
+    if (!plano) { console.log(C.gris('     ' + JSON.stringify(r.datos).slice(0, 600))); continue; }
+    for (const [k, v] of Object.entries(plano)) console.log('     ' + C.gris(k.padEnd(26) + '= ' + String(v).slice(0, 60)));
   }
-  console.log(C.gris('\n  Con esto puedo escribir la revision sobre el dato real.\n'));
+  console.log(C.gris('\n  Pegame esta salida y escribo la revision sobre el dato real.\n'));
 }
 
 /** --prueba : manda a Telegram un ejemplo de como se ven las alertas de verdad. */

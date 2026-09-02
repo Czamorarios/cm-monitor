@@ -237,7 +237,15 @@
         },
         "que": "El concurso cierra el miercoles en la noche. El nuevo debe estar cargado a mas tardar el jueves 08:00 (CDMX). Si a esa hora el catalogo sigue mostrando un cierre ya pasado, es que el concurso nuevo no se cargo y nadie puede jugar."
       }
-    ]
+    ],
+    "sorteosTradicionales": {
+      "doc": "drawsAvailables/currentAvailableDraws",
+      "sev": "critico",
+      "minimoDisponibles": 1,
+      "frescuraHoras": 6,
+      "respuestaEsperada": "disponible",
+      "_nota": "Misma fuente que usa la app para el modulo Elige una o varias fechas. Publica. Verifica que haya sorteos con fecha futura, que Loteria Nacional responda que hay disponibles, que la lista este marcada como actual y que se siga refrescando."
+    }
   },
   "ventanas": {
     "ventaElectronicosCerrada": {
