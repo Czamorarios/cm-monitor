@@ -320,15 +320,25 @@ async function sesionDePrueba(cfg) {
   } catch { return (_sesion = { error: 'respuesta de sesion no interpretable' }); }
 }
 
-/** Llama una funcion del backend con la sesion de prueba. Devuelve {code, datos}. */
-async function llamarConSesion(cfg, funcion, cuerpo) {
+/**
+ * Llama una funcion del backend con la sesion de prueba.
+ * Estas rutas son GET y llevan los parametros en la URL (con POST responden 405).
+ */
+async function llamarConSesion(cfg, funcion, params = null, metodo = 'GET') {
   const s = await sesionDePrueba(cfg);
   if (!s) return { code: 0, error: 'sin credenciales de la cuenta de prueba' };
   if (s.error) return { code: 0, error: `no se pudo iniciar sesion: ${s.error}` };
-  const r = await pedir(cfg.funciones.plantillaGen2.replace('{f}', funcion), {
-    metodo: 'POST', timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 200000,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.idToken}` },
-    cuerpo: JSON.stringify(cuerpo || {}),
+
+  let url = cfg.funciones.plantillaGen2.replace('{f}', funcion);
+  const cuerpo = metodo === 'GET' ? null : JSON.stringify(params || {});
+  if (metodo === 'GET' && params && Object.keys(params).length) {
+    url += '?' + new URLSearchParams(params).toString();
+  }
+
+  const r = await pedir(url, {
+    metodo, timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 300000,
+    headers: { Authorization: `Bearer ${s.idToken}`, ...(cuerpo ? { 'Content-Type': 'application/json' } : {}) },
+    cuerpo,
   });
   if (!r.ok) return { code: 0, error: r.error, ms: r.ms };
   let datos = null;
@@ -955,34 +965,56 @@ async function explorarJuegos(cfg, juegos) {
   }
   console.log(C.verde('\n  Sesion iniciada correctamente.\n'));
 
-  // No se sabe de antemano como espera los parametros la funcion: se prueban varias
-  // formas y se reporta cual responde 200.
-  const formas = (g) => ([
-    ['sin cuerpo', {}],
-    ['game', { game: g }],
-    ['gameName', { gameName: g }],
-    ['product', { product: g }],
-    ['name', { name: g }],
-  ]);
-
-  for (const g of juegos) {
-    console.log(C.fuerte(`  ── ${g}`));
-    for (const [etiqueta, cuerpo] of formas(g)) {
-      const r = await llamarConSesion(cfg, 'getgameinfofunction', cuerpo);
-      const marca = r.code === 200 ? C.verde('200') : C.gris(String(r.code || 'error'));
-      let resumen = r.error || '';
-      if (r.datos && typeof r.datos === 'object') {
-        const claves = Array.isArray(r.datos) ? `[array de ${r.datos.length}]` : Object.keys(r.datos).join(', ');
-        resumen = claves.slice(0, 150);
-      } else if (r.texto) resumen = String(r.texto).slice(0, 110);
-      console.log(`     ${marca}  ${etiqueta.padEnd(11)} ${C.gris(resumen)}`);
-      if (r.code === 200) {
-        console.log(C.gris('           contenido: ' + JSON.stringify(r.datos).slice(0, 700)));
-        break;
-      }
+  const resumen = (r) => {
+    if (r.error) return r.error;
+    if (r.datos && typeof r.datos === 'object') {
+      if (Array.isArray(r.datos)) return `[array de ${r.datos.length}] ` + JSON.stringify(r.datos[0] || {}).slice(0, 120);
+      if (r.datos.message) return `${r.datos.code || ''} ${r.datos.message}`.trim();
+      return 'claves: ' + Object.keys(r.datos).join(', ').slice(0, 130);
     }
+    return String(r.texto || '').slice(0, 120);
+  };
+
+  // FASE 1 — descubrir el endpoint y el nombre del parametro. Las rutas son GET;
+  // con POST responden 405. Se prueba con un solo juego para no hacer ruido.
+  const muestra = juegos[0];
+  const candidatos = [
+    ['getgameinfofunction', null], ['getgameinfofunction', { game: muestra }],
+    ['getgameinfofunction', { gameName: muestra }], ['getgameinfofunction', { product: muestra }],
+    ['getgameinfofunction', { name: muestra }], ['getgameinfofunction', { id: muestra }],
+    ['draws', null], ['draws', { game: muestra }], ['draws', { product: muestra }],
+    ['prizes', null], ['prizes', { game: muestra }],
+  ];
+
+  console.log(C.fuerte(`  FASE 1 — buscando el endpoint correcto (muestra: ${muestra})\n`));
+  let bueno = null;
+  for (const [fn, params] of candidatos) {
+    const r = await llamarConSesion(cfg, fn, params);
+    const marca = r.code === 200 ? C.verde('200') : C.gris(String(r.code || 'err'));
+    const etiqueta = `${fn}${params ? '?' + Object.keys(params)[0] + '=' : ''}`;
+    console.log(`     ${marca}  ${etiqueta.padEnd(34)} ${C.gris(resumen(r))}`);
+    if (r.code === 200 && !bueno) { bueno = { fn, params }; console.log(C.verde('           ^ este responde')); }
   }
-  console.log(C.gris('\n  Con esto puedo escribir la revision de "hay concurso vendible" sobre el dato real.\n'));
+
+  if (!bueno) {
+    console.log(C.ama(`
+  Ninguna combinacion respondio 200. Pegame esta salida y sigo probando; puede
+  que la ruta lleve el juego en el camino (/algo/Melate) o que espere otro nombre
+  de parametro. Tambien sirve preguntarle al equipo como consulta la app el
+  estado del sorteo abierto.
+`));
+    return;
+  }
+
+  // FASE 2 — con la forma que funciona, se consulta cada juego.
+  console.log('\n  ' + C.fuerte(`FASE 2 — ${bueno.fn} para cada juego\n`));
+  for (const g of juegos) {
+    const params = bueno.params ? { [Object.keys(bueno.params)[0]]: g } : null;
+    const r = await llamarConSesion(cfg, bueno.fn, params);
+    console.log(`  ── ${C.fuerte(g)}  ${r.code === 200 ? C.verde('200') : C.gris(String(r.code))}  ${C.gris((r.ms || 0) + ' ms')}`);
+    console.log(C.gris('     ' + JSON.stringify(r.datos ?? r.texto ?? r.error).slice(0, 900)));
+  }
+  console.log(C.gris('\n  Con esto puedo escribir la revision sobre el dato real.\n'));
 }
 
 /** --prueba : manda a Telegram un ejemplo de como se ven las alertas de verdad. */
