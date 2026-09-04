@@ -187,13 +187,13 @@
         "product": "GanaGato",
         "maxHoras": 120,
         "sev": "aviso",
-        "cal": "por confirmar"
+        "cal": "por confirmar - vigilar si da falso positivo como Protouch"
       },
       {
         "product": "Protouch",
-        "maxHoras": 120,
+        "maxHoras": 240,
         "sev": "aviso",
-        "cal": "por confirmar"
+        "cal": "~cada 5-8 dias (observado: #883 16ago, #884 24ago, #885 30ago)"
       }
     ],
     "ventanaVenta": [
