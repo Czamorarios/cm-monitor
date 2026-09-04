@@ -1362,7 +1362,9 @@ async function mandarReporte(cfg, texto) {
   const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) return { enviado: false, motivo: 'faltan credenciales de Telegram' };
   const escapa = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const cuerpo = escapa(texto).slice(0, 3800);
+  // Se corta el texto CRUDO y luego se escapa: si se escapara primero, el corte
+  // podria partir una entidad (&amp;) a la mitad y Telegram rechazaria el HTML.
+  const cuerpo = escapa(texto.slice(0, 3500));
   const r = await pedir(`https://api.telegram.org/bot${token}/sendMessage`, {
     metodo: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 15000, leerCuerpo: true,
     cuerpo: JSON.stringify({
@@ -1467,10 +1469,20 @@ async function main() {
   if (!cfg) { console.error('No pude leer checks.config.json'); process.exit(2); }
 
   if (tiene('--reporte')) {
+    // reporte() imprime el CUERPO por stdout (datos de la plataforma).
+    // El estado de ENTREGA va por stderr, para que un workflow lo pueda mostrar en
+    // su log publico sin exponer el cuerpo. Y si no entrega, salimos con codigo != 0
+    // para que la corrida quede en ROJO en vez de fingir exito.
     const texto = reporte(cfg);
-    if (texto && tiene('--enviar')) {
-      const r = await mandarReporte(cfg, texto);
-      console.log(r.enviado ? C.verde('  Reporte enviado por Telegram.\n') : C.ama(`  Reporte NO enviado: ${r.motivo}\n`));
+    if (tiene('--enviar')) {
+      if (!texto) {
+        console.error('ENTREGA: FALLIDA — no hay historial que reportar (el estado no se restauro entre corridas).');
+        process.exitCode = 4;
+      } else {
+        const r = await mandarReporte(cfg, texto);
+        if (r.enviado) console.error('ENTREGA: OK — reporte enviado por Telegram.');
+        else { console.error(`ENTREGA: FALLIDA — ${r.motivo}`); process.exitCode = 4; }
+      }
     }
     return;
   }

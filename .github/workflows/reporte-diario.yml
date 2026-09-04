@@ -36,15 +36,19 @@ jobs:
           NO_COLOR: '1'
         run: |
           set +e
-          node monitor.mjs --reporte --enviar > reporte.txt 2>&1
+          # El CUERPO del reporte (datos de la plataforma) va por stdout -> a un
+          # archivo que NO se muestra en el log publico. El estado de ENTREGA va por
+          # stderr -> ese si se muestra, y no contiene datos de la plataforma, solo
+          # "ENTREGA: OK" o "ENTREGA: FALLIDA — <motivo>".
+          node monitor.mjs --reporte --enviar > reporte.txt 2> estado.txt
           codigo=$?
-          # Log publico: el reporte contiene el historial de fallas de la
-          # plataforma, asi que NO se imprime aqui. Va solo a Telegram.
-          if [ $codigo -ge 2 ]; then
-            echo "El reporte fallo al generarse (codigo $codigo)."
-            exit $codigo
+          cat estado.txt
+          # codigo != 0 significa que NO se entrego. Se deja la corrida en ROJO para
+          # que GitHub notifique, en vez de fingir exito como antes.
+          if [ $codigo -ne 0 ]; then
+            echo "El reporte diario NO se entrego. El motivo esta en la linea de arriba."
+            exit 1
           fi
-          echo "Reporte enviado por Telegram."
 
       # GitHub DESACTIVA los crones de un repositorio sin actividad por 60 dias.
       # Sin esto, el monitoreo se apagaria solo en dos meses, en silencio.
