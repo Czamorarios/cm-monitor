@@ -1013,6 +1013,30 @@ function evaluarEstado(cfg, resultados, opciones) {
   return { estado, alertas };
 }
 
+/**
+ * Envia un mensaje a Telegram con reintento ante migracion a supergrupo.
+ * Cuando un grupo se convierte en supergrupo (pasa al activar historial o agregar
+ * administradores), su chat id CAMBIA y Telegram responde 400 con
+ * migrate_to_chat_id. Aqui se reintenta UNA vez con el id nuevo y se avisa por
+ * stderr, para que el monitor no se quede mudo y se actualice el secreto/.env.
+ */
+async function enviarTelegram(token, payload) {
+  const post = (cuerpo) => pedir(`https://api.telegram.org/bot${token}/sendMessage`, {
+    metodo: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 15000, leerCuerpo: true,
+    cuerpo: JSON.stringify(cuerpo),
+  });
+  let r = await post(payload);
+  if (r.ok && r.code === 400) {
+    let nuevoId;
+    try { nuevoId = JSON.parse(r.texto)?.parameters?.migrate_to_chat_id; } catch { /* ignorar */ }
+    if (nuevoId) {
+      console.error(`AVISO: el grupo de Telegram se migro a supergrupo. Nuevo TELEGRAM_CHAT_ID = ${nuevoId} — actualizalo en el secreto del repo y en .env. Se reintenta ahora con el id nuevo.`);
+      r = await post({ ...payload, chat_id: nuevoId });
+    }
+  }
+  return r.ok && r.code === 200 ? { enviado: true } : { enviado: false, motivo: `Telegram HTTP ${r.code}: ${String(r.texto).slice(0, 200)}` };
+}
+
 async function mandarTelegram(cfg, alertas, resumen) {
   const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chat) return { enviado: false, motivo: 'faltan TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID en .env' };
@@ -1027,11 +1051,7 @@ async function mandarTelegram(cfg, alertas, resumen) {
   }
   lineas.push(`<i>${resumen}</i>`);
 
-  const r = await pedir(`https://api.telegram.org/bot${token}/sendMessage`, {
-    metodo: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 15000, leerCuerpo: true,
-    cuerpo: JSON.stringify({ chat_id: chat, text: lineas.join('\n'), parse_mode: 'HTML', disable_web_page_preview: true }),
-  });
-  return r.ok && r.code === 200 ? { enviado: true } : { enviado: false, motivo: `Telegram HTTP ${r.code}: ${String(r.texto).slice(0, 200)}` };
+  return enviarTelegram(token, { chat_id: chat, text: lineas.join('\n'), parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 /** Revisa que las credenciales de Telegram existan y tengan buena forma. Nunca imprime valores. */
@@ -1365,15 +1385,11 @@ async function mandarReporte(cfg, texto) {
   // Se corta el texto CRUDO y luego se escapa: si se escapara primero, el corte
   // podria partir una entidad (&amp;) a la mitad y Telegram rechazaria el HTML.
   const cuerpo = escapa(texto.slice(0, 3500));
-  const r = await pedir(`https://api.telegram.org/bot${token}/sendMessage`, {
-    metodo: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 15000, leerCuerpo: true,
-    cuerpo: JSON.stringify({
-      chat_id: chat,
-      text: `<b>${cfg.nombre} — reporte</b>\n<pre>${cuerpo}</pre>`,
-      parse_mode: 'HTML', disable_web_page_preview: true,
-    }),
+  return enviarTelegram(token, {
+    chat_id: chat,
+    text: `<b>${cfg.nombre} — reporte</b>\n<pre>${cuerpo}</pre>`,
+    parse_mode: 'HTML', disable_web_page_preview: true,
   });
-  return r.ok && r.code === 200 ? { enviado: true } : { enviado: false, motivo: `Telegram HTTP ${r.code}: ${String(r.texto).slice(0, 200)}` };
 }
 
 function reporte(cfg) {
