@@ -360,6 +360,7 @@ function plano(doc) {
  * perfil privado. Si no hay credenciales, esas revisiones sencillamente no existen.
  */
 let _sesion = null;
+let _sesionEnCurso = null;   // promesa del login en vuelo, para no lanzar varios a la vez
 
 async function sesionDePrueba(cfg) {
   if (_sesion && _sesion.idToken && _sesion.expira > Date.now() + 60000) return _sesion;
@@ -368,25 +369,32 @@ async function sesionDePrueba(cfg) {
   const clave = process.env.CM_PASSWORD_PRUEBA || '';
   if (!correo || !clave) return null;
 
-  if (!await asegurarFirebase(cfg)) return { error: 'no se pudo obtener la configuracion de Firebase del sitio' };
-
-  const r = await pedir(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.firebase.apiKeyPublica}`, {
-    metodo: 'POST', headers: { 'Content-Type': 'application/json' },
-    timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true,
-    cuerpo: JSON.stringify({ email: correo, password: clave, returnSecureToken: true }),
-  });
-
-  if (!r.ok || r.code !== 200) {
-    let motivo = r.error || `HTTP ${r.code}`;
-    try { motivo = JSON.parse(r.texto).error?.message || motivo; } catch { /* ignorar */ }
-    _sesion = { error: motivo };          // nunca se guarda la clave ni el token
-    return _sesion;
+  // Un solo login a la vez: si varias revisiones piden sesion en paralelo (la
+  // concurrencia del monitor), todas esperan el MISMO login en lugar de disparar
+  // uno cada una, lo que hacia que Firebase cortara el exceso de intentos.
+  // La comprobacion y asignacion son sincronas (sin await en medio), asi que dos
+  // llamadas concurrentes comparten la misma promesa.
+  if (!_sesionEnCurso) {
+    _sesionEnCurso = (async () => {
+      if (!await asegurarFirebase(cfg)) return { error: 'no se pudo obtener la configuracion de Firebase del sitio' };
+      const r = await pedir(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.firebase.apiKeyPublica}`, {
+        metodo: 'POST', headers: { 'Content-Type': 'application/json' },
+        timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true,
+        cuerpo: JSON.stringify({ email: correo, password: clave, returnSecureToken: true }),
+      });
+      if (!r.ok || r.code !== 200) {
+        let motivo = r.error || `HTTP ${r.code}`;
+        try { motivo = JSON.parse(r.texto).error?.message || motivo; } catch { /* ignorar */ }
+        return { error: motivo };            // no se cachea en _sesion: el proximo intento reintenta
+      }
+      try {
+        const j = JSON.parse(r.texto);
+        _sesion = { idToken: j.idToken, expira: Date.now() + (Number(j.expiresIn || 3600) - 60) * 1000 };
+        return _sesion;
+      } catch { return { error: 'respuesta de sesion no interpretable' }; }
+    })().finally(() => { _sesionEnCurso = null; });
   }
-  try {
-    const j = JSON.parse(r.texto);
-    _sesion = { idToken: j.idToken, expira: Date.now() + (Number(j.expiresIn || 3600) - 60) * 1000 };
-    return _sesion;
-  } catch { return (_sesion = { error: 'respuesta de sesion no interpretable' }); }
+  return _sesionEnCurso;
 }
 
 /**
