@@ -307,6 +307,13 @@ async function tokenSesion(cfg) {
   return s && !s.error ? s.idToken : null;
 }
 
+/** Motivo por el que no se pudo iniciar sesion (para que las revisiones lo muestren). */
+async function motivoSesion(cfg) {
+  const s = await sesionDePrueba(cfg);
+  if (!s) return 'no hay credenciales de la cuenta de prueba';
+  return s.error || null;
+}
+
 /** Desenvuelve el JSON de Firestore (mapValue/arrayValue/xxxValue) a datos normales. */
 function desenvolver(v) {
   if (v == null) return v;
@@ -377,21 +384,30 @@ async function sesionDePrueba(cfg) {
   if (!_sesionEnCurso) {
     _sesionEnCurso = (async () => {
       if (!await asegurarFirebase(cfg)) return { error: 'no se pudo obtener la configuracion de Firebase del sitio' };
-      const r = await pedir(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.firebase.apiKeyPublica}`, {
-        metodo: 'POST', headers: { 'Content-Type': 'application/json' },
-        timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true,
-        cuerpo: JSON.stringify({ email: correo, password: clave, returnSecureToken: true }),
-      });
-      if (!r.ok || r.code !== 200) {
-        let motivo = r.error || `HTTP ${r.code}`;
-        try { motivo = JSON.parse(r.texto).error?.message || motivo; } catch { /* ignorar */ }
-        return { error: motivo };            // no se cachea en _sesion: el proximo intento reintenta
+      // Reintentos: Firebase a veces cuelga o corta un login (sobre todo si le llegan
+      // varios juntos). Un login aislado responde en ~0.2s, asi que reintentar 2 veces
+      // con espera cubre los fallos transitorios sin castigar a la cuenta.
+      let ultimoMotivo = 'sin respuesta';
+      for (let intento = 0; intento < 3; intento++) {
+        if (intento) await new Promise((res) => setTimeout(res, 2000));
+        const r = await pedir(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.firebase.apiKeyPublica}`, {
+          metodo: 'POST', headers: { 'Content-Type': 'application/json' },
+          timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true,
+          cuerpo: JSON.stringify({ email: correo, password: clave, returnSecureToken: true }),
+        });
+        if (r.ok && r.code === 200) {
+          try {
+            const j = JSON.parse(r.texto);
+            _sesion = { idToken: j.idToken, expira: Date.now() + (Number(j.expiresIn || 3600) - 60) * 1000 };
+            return _sesion;
+          } catch { return { error: 'respuesta de sesion no interpretable' }; }
+        }
+        ultimoMotivo = r.error || `HTTP ${r.code}`;
+        try { ultimoMotivo = JSON.parse(r.texto).error?.message || ultimoMotivo; } catch { /* ignorar */ }
+        // Un error de credenciales no se reintenta: no va a cambiar.
+        if (/INVALID_(PASSWORD|LOGIN_CREDENTIALS|EMAIL)|EMAIL_NOT_FOUND|USER_DISABLED/i.test(ultimoMotivo)) break;
       }
-      try {
-        const j = JSON.parse(r.texto);
-        _sesion = { idToken: j.idToken, expira: Date.now() + (Number(j.expiresIn || 3600) - 60) * 1000 };
-        return _sesion;
-      } catch { return { error: 'respuesta de sesion no interpretable' }; }
+      return { error: ultimoMotivo };          // no se cachea en _sesion: el proximo intento reintenta
     })().finally(() => { _sesionEnCurso = null; });
   }
   return _sesionEnCurso;
@@ -622,7 +638,7 @@ function construirRevisiones(cfg) {
         // 2) Verificacion CON sesion (si la entrada lo pide).
         if (conSesion) {
           const token = await tokenSesion(cfg);
-          if (!token) return { ok: false, detalle: 'no se pudo iniciar sesion para verificar el acceso autenticado', ms: r.ms };
+          if (!token) return { ok: false, detalle: `no se pudo iniciar sesion: ${await motivoSesion(cfg)}`, ms: r.ms };
           const ra = await fsListar(cfg, c.col, 1, token);
           if (!ra.ok) return { ok: false, detalle: `con sesion: ${ra.error}`, ms: ra.ms };
           if (ra.code !== conSesion)
@@ -660,7 +676,7 @@ function construirRevisiones(cfg) {
       // Se hace asi a proposito: la consulta filtrada por product exige un indice compuesto
       // en Firestore, y crear un indice seria un cambio en produccion.
       const token = await tokenSesion(cfg);
-      if (!token) return { ok: false, detalle: 'no se pudo iniciar sesion para leer los resultados' };
+      if (!token) return { ok: false, detalle: `no se pudo iniciar sesion: ${await motivoSesion(cfg)}` };
       const r = await fsConsulta(cfg, 'gameResult', 'createdAt', 120, token);
       if (!r.ok) return { ok: false, detalle: `no se pudo consultar: ${r.error}`, ms: r.ms };
       if (r.code !== 200) return { ok: false, detalle: `HTTP ${r.code} al consultar gameResult`, ms: r.ms };
@@ -949,7 +965,7 @@ function construirRevisiones(cfg) {
     nombre: 'Resultados de Loteria tradicional (billetes/cachitos)',
     async run() {
       const token = await tokenSesion(cfg);
-      if (!token) return { ok: false, detalle: 'no se pudo iniciar sesion para leer los resultados de Loteria' };
+      if (!token) return { ok: false, detalle: `no se pudo iniciar sesion: ${await motivoSesion(cfg)}` };
       const r = await fsConsulta(cfg, 'resultsLotenal', 'createdAt', 20, token);
       if (!r.ok || r.code !== 200) return { ok: false, detalle: r.error || `HTTP ${r.code}`, ms: r.ms };
       let filas; try { filas = JSON.parse(r.texto); } catch { return { ok: false, detalle: 'respuesta no interpretable', ms: r.ms }; }
@@ -1562,6 +1578,14 @@ async function main() {
   // Las capas 2 y 3 necesitan el projectId y la API key publica, que se leen
   // en vivo del sitio si la configuracion no los trae (caso del repo publico).
   if (capas.some((c) => c >= 2)) await asegurarFirebase(cfg);
+
+  // Calentar la sesion UNA vez, en serie, antes de que arranquen las revisiones en
+  // paralelo. Asi el login se hace una sola vez por corrida (con reintentos) y ninguna
+  // revision dispara su propio login durante la fase concurrente, que es justo lo que
+  // hacia que Firebase colgara la rafaga. Si falla, las revisiones lo reportaran con
+  // su motivo; no se aborta la corrida (el resto del monitoreo debe seguir).
+  const hayCred = Boolean((process.env.CM_USUARIO_PRUEBA || '').trim() && process.env.CM_PASSWORD_PRUEBA);
+  if (hayCred && capas.some((c) => c >= 2)) await sesionDePrueba(cfg).catch(() => {});
 
   const t0 = Date.now();
   const { resultados } = await correr(cfg, capas, opciones);
