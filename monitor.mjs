@@ -246,29 +246,40 @@ function fechaDMY(s) {
   return m ? Number(m[3] + m[2] + m[1]) : null;
 }
 
-/** Peticion HTTP medida. Nunca lanza: los errores vienen en el resultado. */
+/**
+ * Peticion HTTP medida. Nunca lanza: los errores vienen en el resultado.
+ * opciones.reintentosRed: reintenta N veces ante un fallo de CONEXION (fetch failed /
+ * timeout), no ante respuestas HTTP. Sirve cuando el dominio tiene varias IPs y una
+ * esta muerta: Node se puede pegar a la mala, y un reintento reabre conexion y puede
+ * caer en la buena. Solo reintenta fallos de red, nunca un 4xx/5xx (esos son reales).
+ */
 async function pedir(url, opciones = {}) {
-  const { metodo = 'GET', timeoutMs = 20000, leerCuerpo = false, maxBytes = 300000, cuerpo = null, headers = {} } = opciones;
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  const t0 = Date.now();
-  try {
-    const r = await fetch(url, {
-      method: metodo, signal: ctl.signal, redirect: 'follow',
-      headers: { 'User-Agent': 'cm-monitor/1.0 (+monitoreo interno CMillonario)', ...headers },
-      body: cuerpo,
-    });
-    let texto = null;
-    if (leerCuerpo) {
-      const buf = await r.arrayBuffer();
-      texto = Buffer.from(buf.slice(0, maxBytes)).toString('utf8');
-    } else {
-      try { await r.arrayBuffer(); } catch { /* ignorar */ }
-    }
-    return { ok: true, code: r.status, ct: r.headers.get('content-type') || '', headers: r.headers, texto, ms: Date.now() - t0 };
-  } catch (e) {
-    return { ok: false, code: 0, ct: '', headers: null, texto: null, ms: Date.now() - t0, error: e.name === 'AbortError' ? `timeout ${timeoutMs}ms` : String(e.message || e) };
-  } finally { clearTimeout(t); }
+  const { metodo = 'GET', timeoutMs = 20000, leerCuerpo = false, maxBytes = 300000, cuerpo = null, headers = {}, reintentosRed = 0 } = opciones;
+  let ultimo;
+  for (let intento = 0; intento <= reintentosRed; intento++) {
+    if (intento) await new Promise((res) => setTimeout(res, 800));
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    const t0 = Date.now();
+    try {
+      const r = await fetch(url, {
+        method: metodo, signal: ctl.signal, redirect: 'follow',
+        headers: { 'User-Agent': 'cm-monitor/1.0 (+monitoreo interno CMillonario)', ...headers },
+        body: cuerpo,
+      });
+      let texto = null;
+      if (leerCuerpo) {
+        const buf = await r.arrayBuffer();
+        texto = Buffer.from(buf.slice(0, maxBytes)).toString('utf8');
+      } else {
+        try { await r.arrayBuffer(); } catch { /* ignorar */ }
+      }
+      return { ok: true, code: r.status, ct: r.headers.get('content-type') || '', headers: r.headers, texto, ms: Date.now() - t0, intentos: intento + 1 };
+    } catch (e) {
+      ultimo = { ok: false, code: 0, ct: '', headers: null, texto: null, ms: Date.now() - t0, error: e.name === 'AbortError' ? `timeout ${timeoutMs}ms` : String(e.message || e), intentos: intento + 1 };
+    } finally { clearTimeout(t); }
+  }
+  return ultimo;
 }
 
 function certificado(host) {
@@ -468,7 +479,7 @@ function construirRevisiones(cfg) {
   add({
     id: 'home', capa: 1, sev: 'critico', secuencial: true, nombre: 'Home responde y trae contenido real',
     async run(ctx) {
-      const r = await pedir(cfg.sitio.principal, { timeoutMs: U.timeoutMs, leerCuerpo: true });
+      const r = await pedir(cfg.sitio.principal, { timeoutMs: U.timeoutMs, leerCuerpo: true, reintentosRed: 2 });
       ctx.home = r;
       if (!r.ok) return { ok: false, detalle: `sin respuesta: ${r.error}`, ms: r.ms };
       if (r.code !== 200) return { ok: false, detalle: `HTTP ${r.code}`, ms: r.ms };
@@ -496,7 +507,7 @@ function construirRevisiones(cfg) {
         const m = ctx.home.texto.match(patron);
         if (!m) return { ok: false, detalle: `el HTML ya no referencia un archivo ${ext} con el patron esperado (cambio la forma del build?)` };
         const url = new URL(m[1], cfg.sitio.principal).href;
-        const r = await pedir(url, { timeoutMs: U.timeoutMs });
+        const r = await pedir(url, { timeoutMs: U.timeoutMs, reintentosRed: 2 });
         if (!r.ok) return { ok: false, detalle: `${m[1]}: ${r.error}`, ms: r.ms };
         if (r.code !== 200) return { ok: false, detalle: `${m[1]} devuelve HTTP ${r.code} -> PANTALLA BLANCA: el HTML pide un archivo que no existe`, ms: r.ms };
         return { ok: true, detalle: `${m[1]} OK`, ms: r.ms };
@@ -510,7 +521,7 @@ function construirRevisiones(cfg) {
       id: `dominio_${d.url.replace(/https?:\/\//, '').replace(/\W/g, '_')}`, capa: 1, sev: d.sev,
       nombre: `Dominio ${d.url.replace('https://', '')}`,
       async run() {
-        const r = await pedir(d.url, { timeoutMs: U.timeoutMs, leerCuerpo: true });
+        const r = await pedir(d.url, { timeoutMs: U.timeoutMs, leerCuerpo: true, reintentosRed: 2 });
         if (!r.ok) return { ok: false, detalle: r.error, ms: r.ms };
         if (r.code !== 200) return { ok: false, detalle: `HTTP ${r.code}`, ms: r.ms };
         if (!r.texto?.includes(cfg.sitio.marcadorHtml)) return { ok: false, detalle: 'HTTP 200 sin el marcador de contenido', ms: r.ms };
@@ -667,7 +678,7 @@ function construirRevisiones(cfg) {
     add({
       id: `tercero_${t.id}`, capa: 2, sev: t.sev, nombre: `Tercero: ${t.que}`,
       async run() {
-        const r = await pedir(t.url, { timeoutMs: U.timeoutMs });
+        const r = await pedir(t.url, { timeoutMs: U.timeoutMs, reintentosRed: 2 });
         if (!r.ok) return { ok: false, detalle: r.error, ms: r.ms };
         return { ok: r.code === 200, detalle: `HTTP ${r.code} (${r.ms} ms)`, ms: r.ms };
       },
@@ -1598,7 +1609,13 @@ async function main() {
   // hacia que Firebase colgara la rafaga. Si falla, las revisiones lo reportaran con
   // su motivo; no se aborta la corrida (el resto del monitoreo debe seguir).
   const hayCred = Boolean((process.env.CM_USUARIO_PRUEBA || '').trim() && process.env.CM_PASSWORD_PRUEBA);
-  if (hayCred && capas.some((c) => c >= 2)) await sesionDePrueba(cfg).catch(() => {});
+  if (hayCred && capas.some((c) => c >= 2)) {
+    const s = await sesionDePrueba(cfg).catch(() => null);
+    // Salud del monitor (NO de la plataforma): se imprime por stderr con un marcador
+    // que el workflow saca al log publico. Asi el estado del login es visible en cada
+    // corrida sin alertar al grupo, para poder verificar que quedo arreglado.
+    console.error(`MONITOR-SALUD sesion=${s && s.idToken ? 'OK' : 'FALLO'}${s && s.error ? ' (' + s.error + ')' : ''}`);
+  }
 
   const t0 = Date.now();
   const { resultados } = await correr(cfg, capas, opciones);

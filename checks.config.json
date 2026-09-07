@@ -239,8 +239,13 @@
     }
   },
   "reconocidos": {
-    "_comentario": "Revisiones que ya sabemos en rojo y estan en proceso de arreglo: siguen en rojo en pantalla pero no repiten alerta.",
-    "ids": []
+    "_comentario": "Revisiones en rojo/aviso a proposito que NO deben repetir alerta al grupo. Se ven en pantalla pero no notifican.",
+    "ids": [
+      "dns"
+    ],
+    "_porQue": {
+      "dns": "Silenciado 2026-09-07 a peticion de Cesar: cmillonario.com tiene un registro A de Vercel (76.76.21.21) ademas del de Firebase; el equipo ya lo esta quitando. QUITAR de esta lista cuando el registro de Vercel desaparezca, para que el DNS vuelva a vigilarse."
+    }
   },
   "desactivadas": {
     "_comentario": "Ids de revisiones apagadas a proposito. Se siguen construyendo pero no se ejecutan, no cuentan en el total y no pueden alertar.",

@@ -125,7 +125,11 @@ jobs:
                 break
               fi
             else
-              echo "[ciclo $ciclo/$modo] revision completada"
+              # La linea MONITOR-SALUD es estado del MONITOR (login de la cuenta de
+              # prueba: OK/FALLO), no de la plataforma, asi que es seguro mostrarla.
+              # Sirve para verificar en el log que el login quedo arreglado.
+              salud=$(grep -m1 "MONITOR-SALUD" salida.txt || true)
+              echo "[ciclo $ciclo/$modo] revision completada${salud:+  ·  $salud}"
             fi
 
             # Descontar lo que tardo la revision, para que el ritmo sea estable.
