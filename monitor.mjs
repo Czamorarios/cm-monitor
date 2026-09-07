@@ -314,6 +314,16 @@ async function motivoSesion(cfg) {
   return s.error || null;
 }
 
+/**
+ * Resultado estandar cuando una revision NO SE PUDO VERIFICAR por falta de sesion.
+ * Es un problema del monitor (no pudo iniciar sesion), NO una caida de la plataforma,
+ * asi que se marca sev 'info': aparece en pantalla pero NO alerta al grupo operativo.
+ * Distinguir "no pude verificar" de "la plataforma esta mal" evita falsos reportes.
+ */
+async function noVerificado(cfg, ms) {
+  return { ok: false, sev: 'info', detalle: `NO VERIFICADO (el monitor no pudo iniciar sesion): ${await motivoSesion(cfg)}`, ms };
+}
+
 /** Desenvuelve el JSON de Firestore (mapValue/arrayValue/xxxValue) a datos normales. */
 function desenvolver(v) {
   if (v == null) return v;
@@ -638,7 +648,7 @@ function construirRevisiones(cfg) {
         // 2) Verificacion CON sesion (si la entrada lo pide).
         if (conSesion) {
           const token = await tokenSesion(cfg);
-          if (!token) return { ok: false, detalle: `no se pudo iniciar sesion: ${await motivoSesion(cfg)}`, ms: r.ms };
+          if (!token) return noVerificado(cfg, r.ms);
           const ra = await fsListar(cfg, c.col, 1, token);
           if (!ra.ok) return { ok: false, detalle: `con sesion: ${ra.error}`, ms: ra.ms };
           if (ra.code !== conSesion)
@@ -676,7 +686,7 @@ function construirRevisiones(cfg) {
       // Se hace asi a proposito: la consulta filtrada por product exige un indice compuesto
       // en Firestore, y crear un indice seria un cambio en produccion.
       const token = await tokenSesion(cfg);
-      if (!token) return { ok: false, detalle: `no se pudo iniciar sesion: ${await motivoSesion(cfg)}` };
+      if (!token) return noVerificado(cfg);
       const r = await fsConsulta(cfg, 'gameResult', 'createdAt', 120, token);
       if (!r.ok) return { ok: false, detalle: `no se pudo consultar: ${r.error}`, ms: r.ms };
       if (r.code !== 200) return { ok: false, detalle: `HTTP ${r.code} al consultar gameResult`, ms: r.ms };
@@ -919,6 +929,9 @@ function construirRevisiones(cfg) {
       nombre: `Sorteo disponible: ${j.que || j.product}`,
       omitirEn: j.omitirEn ?? 'ventaElectronicosCerrada',
       async run() {
+        // Si el monitor no pudo iniciar sesion, es problema del monitor, no de la
+        // plataforma: se reporta como NO VERIFICADO (info), sin alertar al grupo.
+        if (!await tokenSesion(cfg)) return noVerificado(cfg);
         // El backend de juego devuelve 504 de vez en cuando (medido: ~13% de las
         // llamadas, y solo cuando varias salen a la vez; aislada respondio 8 de 8).
         // Sin reintento, dos de esos seguidos generarian una alerta falsa casi a
@@ -965,7 +978,7 @@ function construirRevisiones(cfg) {
     nombre: 'Resultados de Loteria tradicional (billetes/cachitos)',
     async run() {
       const token = await tokenSesion(cfg);
-      if (!token) return { ok: false, detalle: `no se pudo iniciar sesion: ${await motivoSesion(cfg)}` };
+      if (!token) return noVerificado(cfg);
       const r = await fsConsulta(cfg, 'resultsLotenal', 'createdAt', 20, token);
       if (!r.ok || r.code !== 200) return { ok: false, detalle: r.error || `HTTP ${r.code}`, ms: r.ms };
       let filas; try { filas = JSON.parse(r.texto); } catch { return { ok: false, detalle: 'respuesta no interpretable', ms: r.ms }; }
