@@ -104,31 +104,13 @@
     }
   ],
   "firestore": {
-    "_nota": "Solo colecciones de catalogo, las mismas que la app lee desde el navegador de un visitante sin iniciar sesion. http = codigo de acceso esperado (200 = lectura publica).",
+    "_nota": "Solo colecciones que un visitante SIN sesion lee (catalogo del home, textos legales). Las de resultados/sorteos pasaron a solo-con-sesion (cambio del equipo 2026-09-07) y se vigilan desde el perfil privado.",
     "accesoEsperado": [
       {
         "col": "gamesHome",
         "http": 200,
         "sev": "critico",
         "que": "catalogo del home"
-      },
-      {
-        "col": "gameResult",
-        "http": 200,
-        "sev": "critico",
-        "que": "resultados de sorteos"
-      },
-      {
-        "col": "resultsLotenal",
-        "http": 200,
-        "sev": "critico",
-        "que": "resultados Loteria tradicional"
-      },
-      {
-        "col": "drawsClosed",
-        "http": 200,
-        "sev": "aviso",
-        "que": "sorteos cerrados"
       },
       {
         "col": "legal",

@@ -286,15 +286,25 @@ function certificado(host) {
 const fsUrl = (cfg, ruta) =>
   `https://firestore.googleapis.com/v1/projects/${cfg.firebase.projectId}/databases/(default)/documents${ruta}`;
 
-async function fsListar(cfg, col, pageSize = 1) {
+// Cabecera de autenticacion opcional. Si se pasa un token (de la cuenta de prueba),
+// la lectura se hace CON sesion; si no, es anonima (solo la API key publica).
+const authHdr = (token) => (token ? { Authorization: `Bearer ${token}` } : {});
+
+async function fsListar(cfg, col, pageSize = 1, token = null) {
   return pedir(`${fsUrl(cfg, '/' + col)}?key=${cfg.firebase.apiKeyPublica}&pageSize=${pageSize}`,
-    { timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true });
+    { timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, headers: authHdr(token) });
 }
 
 /** Lee un documento concreto: ruta tipo "coleccion/documento". */
-async function fsDocumento(cfg, ruta) {
+async function fsDocumento(cfg, ruta, token = null) {
   return pedir(`${fsUrl(cfg, '/' + ruta)}?key=${cfg.firebase.apiKeyPublica}`,
-    { timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 400000 });
+    { timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 400000, headers: authHdr(token) });
+}
+
+/** Devuelve el idToken de la cuenta de prueba si hay credenciales y sesion valida; si no, null. */
+async function tokenSesion(cfg) {
+  const s = await sesionDePrueba(cfg);
+  return s && !s.error ? s.idToken : null;
 }
 
 /** Desenvuelve el JSON de Firestore (mapValue/arrayValue/xxxValue) a datos normales. */
@@ -312,7 +322,7 @@ function desenvolver(v) {
   return v[t];
 }
 
-async function fsConsulta(cfg, col, campoOrden, limite) {
+async function fsConsulta(cfg, col, campoOrden, limite, token = null) {
   const cuerpo = JSON.stringify({
     structuredQuery: {
       from: [{ collectionId: col }],
@@ -321,7 +331,7 @@ async function fsConsulta(cfg, col, campoOrden, limite) {
     },
   });
   return pedir(`${fsUrl(cfg, ':runQuery')}?key=${cfg.firebase.apiKeyPublica}`,
-    { metodo: 'POST', cuerpo, headers: { 'Content-Type': 'application/json' }, timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 900000 });
+    { metodo: 'POST', cuerpo, headers: { 'Content-Type': 'application/json', ...authHdr(token) }, timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 900000 });
 }
 
 /** Convierte un documento REST de Firestore a objeto plano (solo tipos simples). */
@@ -415,6 +425,9 @@ function construirRevisiones(cfg) {
   const U = cfg.umbrales;
   const R = [];
   const add = (o) => R.push(o);
+  // Hay cuenta de prueba? Varias revisiones (leer resultados, sorteos por juego)
+  // necesitan sesion; sin credenciales, no se construyen.
+  const hayCredenciales = Boolean((process.env.CM_USUARIO_PRUEBA || '').trim() && process.env.CM_PASSWORD_PRUEBA);
 
   // ═══════════ CAPA 1 — DISPONIBILIDAD ═══════════
 
@@ -573,25 +586,44 @@ function construirRevisiones(cfg) {
     },
   });
 
-  // Reglas de Firestore, dirigido por datos. Cada entrada de configuracion dice
-  // que coleccion se consulta y que acceso se espera (200 = lectura publica que la
-  // app necesita, 403 = acceso restringido). El codigo no sabe ni le importa cuales
-  // son: eso lo pone la configuracion del perfil que este activo.
+  // Reglas de Firestore, dirigido por datos. Cada entrada dice:
+  //   http          = codigo esperado SIN sesion (200 = lectura publica; 403 = cerrada al anonimo)
+  //   httpConSesion = codigo esperado CON la cuenta de prueba (opcional). Cuando se
+  //                   pone, la revision verifica AMBOS: que siga cerrada al anonimo Y
+  //                   que un usuario con sesion si pueda leerla. Es la cobertura de
+  //                   las colecciones "solo autenticados" (resultados, sorteos).
+  // El codigo no sabe cuales son: eso lo pone la configuracion del perfil activo.
   for (const c of cfg.firestore?.accesoEsperado ?? []) {
     const esperado = Number(c.http) || 200;
+    const conSesion = c.httpConSesion ? Number(c.httpConSesion) : null;
+    const etiqueta = conSesion
+      ? `${esperado} anonimo / ${conSesion} con sesion`
+      : String(esperado);
     add({
       id: `fs_acceso_${c.col}`, capa: 2, sev: c.sev || 'critico', privada: c._priv === true,
-      nombre: `Firestore ${c.col}: acceso esperado ${esperado}${c.que ? ' (' + c.que + ')' : ''}`,
+      nombre: `Firestore ${c.col}: acceso esperado ${etiqueta}${c.que ? ' (' + c.que + ')' : ''}`,
       async run() {
+        // 1) Verificacion SIN sesion.
         const r = await fsListar(cfg, c.col, 1);
         if (!r.ok) return { ok: false, detalle: r.error, ms: r.ms };
-        if (esperado === 200) {
-          return r.code === 200
-            ? { ok: true, detalle: `HTTP 200 (${r.ms} ms)`, ms: r.ms }
-            : { ok: false, detalle: `esperaba lectura publica y obtuvo HTTP ${r.code}`, ms: r.ms };
+        if (esperado === 200 && r.code !== 200)
+          return { ok: false, detalle: `sin sesion esperaba lectura publica y obtuvo HTTP ${r.code}`, ms: r.ms };
+        if (esperado !== 200 && r.code === 200)
+          return { ok: false, detalle: `sin sesion esperaba acceso restringido y obtuvo HTTP 200`, ms: r.ms };
+
+        // 2) Verificacion CON sesion (si la entrada lo pide).
+        if (conSesion) {
+          const token = await tokenSesion(cfg);
+          if (!token) return { ok: false, detalle: 'no se pudo iniciar sesion para verificar el acceso autenticado', ms: r.ms };
+          const ra = await fsListar(cfg, c.col, 1, token);
+          if (!ra.ok) return { ok: false, detalle: `con sesion: ${ra.error}`, ms: ra.ms };
+          if (ra.code !== conSesion)
+            return { ok: false, detalle: `con sesion esperaba HTTP ${conSesion} y obtuvo ${ra.code} -> los usuarios con sesion no pueden leer ${c.col}`, ms: ra.ms };
+          return { ok: true, detalle: `HTTP ${r.code} anonimo (cerrada) y ${ra.code} con sesion (accesible)`, ms: r.ms };
         }
-        return r.code === 200
-          ? { ok: false, detalle: `esperaba acceso restringido y obtuvo HTTP 200`, ms: r.ms }
+
+        return esperado === 200
+          ? { ok: true, detalle: `HTTP 200 (${r.ms} ms)`, ms: r.ms }
           : { ok: true, detalle: `acceso restringido, HTTP ${r.code} (${r.ms} ms)`, ms: r.ms };
       },
     });
@@ -610,14 +642,18 @@ function construirRevisiones(cfg) {
 
   // ═══════════ CAPA 3 — NEGOCIO ═══════════
 
-  add({
-    id: 'neg_resultados', capa: 3, sev: 'critico',
+  // gameResult paso a "solo con sesion" (cambio del equipo, 2026-09-07), asi que
+  // esta revision ahora requiere la cuenta de prueba y vive en el perfil privado.
+  if (hayCredenciales) add({
+    id: 'neg_resultados', capa: 3, sev: 'critico', privada: true,
     nombre: 'Resultados de sorteos cargados al dia',
     async run(ctx) {
       // Se piden los ultimos 120 resultados por fecha y se filtra por juego del lado del monitor.
       // Se hace asi a proposito: la consulta filtrada por product exige un indice compuesto
       // en Firestore, y crear un indice seria un cambio en produccion.
-      const r = await fsConsulta(cfg, 'gameResult', 'createdAt', 120);
+      const token = await tokenSesion(cfg);
+      if (!token) return { ok: false, detalle: 'no se pudo iniciar sesion para leer los resultados' };
+      const r = await fsConsulta(cfg, 'gameResult', 'createdAt', 120, token);
       if (!r.ok) return { ok: false, detalle: `no se pudo consultar: ${r.error}`, ms: r.ms };
       if (r.code !== 200) return { ok: false, detalle: `HTTP ${r.code} al consultar gameResult`, ms: r.ms };
 
@@ -853,7 +889,6 @@ function construirRevisiones(cfg) {
    *
    * Requiere sesion; si no hay credenciales, estas revisiones no se construyen.
    */
-  const hayCredenciales = Boolean((process.env.CM_USUARIO_PRUEBA || '').trim() && process.env.CM_PASSWORD_PRUEBA);
   for (const j of (hayCredenciales ? cfg.juegos?.sorteoAbierto ?? [] : [])) {
     add({
       id: `neg_abierto_${j.product}`, capa: 3, sev: j.sev || 'critico', privada: j._priv === true,
@@ -900,11 +935,14 @@ function construirRevisiones(cfg) {
     });
   }
 
-  add({
-    id: 'neg_lotenal', capa: 3, sev: 'critico',
+  // resultsLotenal paso a "solo con sesion" (cambio del equipo, 2026-09-07).
+  if (hayCredenciales) add({
+    id: 'neg_lotenal', capa: 3, sev: 'critico', privada: true,
     nombre: 'Resultados de Loteria tradicional (billetes/cachitos)',
     async run() {
-      const r = await fsConsulta(cfg, 'resultsLotenal', 'createdAt', 20);
+      const token = await tokenSesion(cfg);
+      if (!token) return { ok: false, detalle: 'no se pudo iniciar sesion para leer los resultados de Loteria' };
+      const r = await fsConsulta(cfg, 'resultsLotenal', 'createdAt', 20, token);
       if (!r.ok || r.code !== 200) return { ok: false, detalle: r.error || `HTTP ${r.code}`, ms: r.ms };
       let filas; try { filas = JSON.parse(r.texto); } catch { return { ok: false, detalle: 'respuesta no interpretable', ms: r.ms }; }
       if (filas[0]?.error) return { ok: false, detalle: `Firestore: ${filas[0].error.message}`.slice(0, 200), ms: r.ms };
