@@ -591,7 +591,11 @@ function construirRevisiones(cfg) {
     nombre: `Funcion ${gen} ${def.f} (${def.que})`,
     async run() {
       // SOLO GET sin cuerpo: no puede mover dinero ni crear registros.
-      const r = await pedir(plantilla.replace('{f}', def.f), { timeoutMs: U.timeoutMs, leerCuerpo: true, maxBytes: 2000 });
+      // reintentosRed: 1 -> un timeout/fallo de conexion aislado se reintenta antes de
+      // marcar la funcion como caida. Absorbe baches momentaneos de red del runner (que
+      // el 2026-09-16 tumbaron 12 revisiones a la vez y se recuperaron solas) y arranques
+      // en frio. Una funcion realmente caida falla los dos intentos igual: sigue alertando.
+      const r = await pedir(plantilla.replace('{f}', def.f), { timeoutMs: U.timeoutMs, leerCuerpo: true, maxBytes: 2000, reintentosRed: 1 });
       if (!r.ok) return { ok: false, detalle: `sin respuesta: ${r.error}`, ms: r.ms };
       if (r.code >= 500) return { ok: false, detalle: `HTTP ${r.code} (error del servidor)`, ms: r.ms };
 
