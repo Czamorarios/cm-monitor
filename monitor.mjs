@@ -1068,23 +1068,32 @@ function evaluarEstado(cfg, resultados, opciones) {
   const reconocidos = new Set(cfg.reconocidos?.ids || []);
 
   for (const r of resultados) {
-    const e = estado.checks[r.id] || { ok: true, fallosSeguidos: 0, desde: iso, alertado: false, ultimaAlerta: null };
+    const e = estado.checks[r.id] || { ok: true, fallosSeguidos: 0, desde: iso, alertado: false, ultimaAlerta: null, avisos: 0 };
 
     if (r.omitida) { estado.checks[r.id] = { ...e, omitidaEn: iso }; continue; }
 
     if (!r.ok) {
       e.fallosSeguidos = (e.fallosSeguidos || 0) + 1;
+      e.avisos = e.avisos || 0;
       if (e.ok) { e.ok = false; e.desde = iso; }
       const alcanzoUmbral = e.fallosSeguidos >= cfg.umbrales.fallosParaAlertar;
       const reaviso = e.alertado && e.ultimaAlerta && (ahora - Date.parse(e.ultimaAlerta)) >= cfg.umbrales.reavisoMinutos * 60000;
       const alertable = cfg.alertas.severidadesQueAlertan.includes(r.sev) && !reconocidos.has(r.id);
-      if (alcanzoUmbral && alertable && (!e.alertado || reaviso)) {
-        alertas.push({ tipo: e.alertado ? 'sigue' : 'abre', ...r, desde: e.desde, fallos: e.fallosSeguidos });
+      // Tope de avisos por incidente: tras maxAvisos notificaciones se deja de avisar
+      // HASTA que la revision cambie de estado a resuelta (la recuperacion si se notifica).
+      // Evita que una falla persistente sature el grupo con recordatorios cada reavisoMinutos.
+      const maxAvisos = cfg.umbrales.maxAvisosPorFalla ?? 3;
+      const quedanAvisos = e.avisos < maxAvisos;
+      if (alcanzoUmbral && alertable && quedanAvisos && (!e.alertado || reaviso)) {
+        e.avisos += 1;
+        alertas.push({ tipo: e.alertado ? 'sigue' : 'abre', ...r, desde: e.desde, fallos: e.fallosSeguidos, aviso: e.avisos, deAvisos: maxAvisos, ultimoAviso: e.avisos >= maxAvisos });
         e.ultimaAlerta = iso;
         if (!e.alertado) {
           e.alertado = true;
           appendFileSync(F_INCIDENTES, JSON.stringify({ ts: iso, evento: 'abre', id: r.id, sev: r.sev, nombre: r.nombre, detalle: r.detalle }) + '\n');
         }
+        if (e.avisos >= maxAvisos)
+          appendFileSync(F_INCIDENTES, JSON.stringify({ ts: iso, evento: 'silencia', id: r.id, nombre: r.nombre, avisos: e.avisos }) + '\n');
       }
     } else {
       if (!e.ok) {
@@ -1092,7 +1101,7 @@ function evaluarEstado(cfg, resultados, opciones) {
         if (e.alertado) alertas.push({ tipo: 'cierra', ...r, duracionMin: minutos });
         appendFileSync(F_INCIDENTES, JSON.stringify({ ts: iso, evento: 'cierra', id: r.id, nombre: r.nombre, duracionMin: Number(minutos) }) + '\n');
       }
-      e.ok = true; e.fallosSeguidos = 0; e.alertado = false; e.ultimaAlerta = null; e.desde = e.desde || iso;
+      e.ok = true; e.fallosSeguidos = 0; e.alertado = false; e.ultimaAlerta = null; e.avisos = 0; e.desde = e.desde || iso;
     }
     e.ultimoDetalle = r.detalle; e.ultimoMs = r.ms ?? null;
     estado.checks[r.id] = e;
@@ -1136,8 +1145,11 @@ async function mandarTelegram(cfg, alertas, resumen) {
   const lineas = [`<b>${cfg.nombre} — monitoreo</b>`, `<i>${new Date().toLocaleString('es-MX', { timeZone: cfg.tz })}</i>`, ''];
   for (const a of alertas) {
     const t = a.tipo === 'cierra' ? `RESUELTO (${a.duracionMin} min)` : a.tipo === 'sigue' ? 'SIGUE FALLANDO' : a.sev.toUpperCase();
-    lineas.push(`${ic[a.tipo]} <b>${t}</b> — ${a.nombre}`);
-    lineas.push(`   <code>${String(a.detalle).slice(0, 300)}</code>`, '');
+    const contador = a.tipo !== 'cierra' && a.deAvisos ? `  (aviso ${a.aviso}/${a.deAvisos})` : '';
+    lineas.push(`${ic[a.tipo]} <b>${t}</b> — ${a.nombre}${contador}`);
+    lineas.push(`   <code>${String(a.detalle).slice(0, 300)}</code>`);
+    if (a.ultimoAviso) lineas.push('   <i>Ultimo aviso: se silencia hasta que cambie a resuelto.</i>');
+    lineas.push('');
   }
   lineas.push(`<i>${resumen}</i>`);
 

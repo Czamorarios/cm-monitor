@@ -11,6 +11,8 @@
     "certDiasCritico": 7,
     "fallosParaAlertar": 2,
     "reavisoMinutos": 30,
+    "maxAvisosPorFalla": 3,
+    "_notaMaxAvisos": "Cuantas veces se notifica una misma falla (el aviso inicial + recordatorios) antes de callar. Tras el aviso 3/3 no se vuelve a notificar esa revision hasta que cambie de estado a RESUELTO, que si se avisa. Evita saturar el grupo con una falla persistente ya conocida.",
     "concurrencia": 8
   },
   "sitio": {
