@@ -1120,9 +1120,13 @@ function evaluarEstado(cfg, resultados, opciones) {
  * stderr, para que el monitor no se quede mudo y se actualice el secreto/.env.
  */
 async function enviarTelegram(token, payload) {
+  // reintentosRed: 2 -> el envio era el unico lugar sin reintento de red. Un bache
+  // momentaneo (que el 2026-09-22 tumbo el reporte diario #24) reintenta en vez de
+  // quedar en rojo. Solo reintenta fallos de CONEXION/timeout, nunca un 4xx real (la
+  // migracion a supergrupo se maneja aparte, con el 400 + migrate_to_chat_id de abajo).
   const post = (cuerpo) => pedir(`https://api.telegram.org/bot${token}/sendMessage`, {
     metodo: 'POST', headers: { 'Content-Type': 'application/json' }, timeoutMs: 15000, leerCuerpo: true,
-    cuerpo: JSON.stringify(cuerpo),
+    cuerpo: JSON.stringify(cuerpo), reintentosRed: 2,
   });
   let r = await post(payload);
   if (r.ok && r.code === 400) {
