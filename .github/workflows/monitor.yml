@@ -75,6 +75,10 @@ jobs:
           CM_CONFIG_PRIVADA_B64: ${{ secrets.CM_CONFIG_PRIVADA_B64 }}
           CM_USUARIO_PRUEBA: ${{ secrets.CM_USUARIO_PRUEBA }}
           CM_PASSWORD_PRUEBA: ${{ secrets.CM_PASSWORD_PRUEBA }}
+          # Cuenta de SOLO LECTURA del CMS, para la bandeja de premios mayores. Solo se
+          # usa en el ciclo profundo (la revision vive en el perfil privado).
+          CM_CMS_USUARIO: ${{ secrets.CM_CMS_USUARIO }}
+          CM_CMS_PASSWORD: ${{ secrets.CM_CMS_PASSWORD }}
           NO_COLOR: '1'
           DURACION_MIN: ${{ github.event.inputs.duracion_min || '300' }}
           INTERVALO_SEG: ${{ github.event.inputs.intervalo_seg || '300' }}

@@ -434,6 +434,48 @@ async function sesionDePrueba(cfg) {
   return _sesionEnCurso;
 }
 
+// ─── Sesion dedicada al CMS (cuenta de SOLO LECTURA para la bandeja de premios) ───
+// Es un usuario distinto al de la cuenta de prueba, en el MISMO proyecto Firebase
+// (cmillonariomx). Mismo patron: un solo login a la vez, con reintentos. No autoriza
+// ni escribe nada; solo lee.
+let _sesionCMS = null;
+let _sesionCMSEnCurso = null;
+
+async function sesionCMS(cfg) {
+  if (_sesionCMS && _sesionCMS.idToken && _sesionCMS.expira > Date.now() + 60000) return _sesionCMS;
+
+  const correo = (process.env.CM_CMS_USUARIO || '').trim();
+  const clave = process.env.CM_CMS_PASSWORD || '';
+  if (!correo || !clave) return null;
+
+  if (!_sesionCMSEnCurso) {
+    _sesionCMSEnCurso = (async () => {
+      if (!await asegurarFirebase(cfg)) return { error: 'no se pudo obtener la configuracion de Firebase del sitio' };
+      let ultimoMotivo = 'sin respuesta';
+      for (let intento = 0; intento < 3; intento++) {
+        if (intento) await new Promise((res) => setTimeout(res, 2000));
+        const r = await pedir(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${cfg.firebase.apiKeyPublica}`, {
+          metodo: 'POST', headers: { 'Content-Type': 'application/json' },
+          timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true,
+          cuerpo: JSON.stringify({ email: correo, password: clave, returnSecureToken: true }),
+        });
+        if (r.ok && r.code === 200) {
+          try {
+            const j = JSON.parse(r.texto);
+            _sesionCMS = { idToken: j.idToken, expira: Date.now() + (Number(j.expiresIn || 3600) - 60) * 1000 };
+            return _sesionCMS;
+          } catch { return { error: 'respuesta de sesion no interpretable' }; }
+        }
+        ultimoMotivo = r.error || `HTTP ${r.code}`;
+        try { ultimoMotivo = JSON.parse(r.texto).error?.message || ultimoMotivo; } catch { /* ignorar */ }
+        if (/INVALID_(PASSWORD|LOGIN_CREDENTIALS|EMAIL)|EMAIL_NOT_FOUND|USER_DISABLED/i.test(ultimoMotivo)) break;
+      }
+      return { error: ultimoMotivo };
+    })().finally(() => { _sesionCMSEnCurso = null; });
+  }
+  return _sesionCMSEnCurso;
+}
+
 /**
  * Llama una funcion del backend con la sesion de prueba.
  * Estas rutas son GET y llevan los parametros en la URL (con POST responden 405).
@@ -690,6 +732,73 @@ function construirRevisiones(cfg) {
   }
 
   // ═══════════ CAPA 3 — NEGOCIO ═══════════
+
+  // Bandeja de PREMIOS MAYORES del CMS (cmillonario-cmsmx). Los premios >= $10,000 NO
+  // se notifican solos: el equipo los revisa a mano. Este monitor avisa al grupo cuando
+  // hay alguno pendiente, con monto / # de sorteo / nombre. Fuente: la MISMA consulta
+  // que usa el CMS -> coleccion "transactions" con pendingPrizeMajor == true.
+  // Vive en el perfil privado (cfg.premiosMayores) y usa su propia cuenta de solo lectura,
+  // por eso solo corre en el ciclo profundo, no cada 5 minutos.
+  // ANTI-FALSO-NEGATIVO: si no se puede iniciar sesion o consultar, NO se reporta "0";
+  // se marca NO VERIFICADO (que si alerta), para no callar cuando quiza SI hay premios.
+  const hayCredCMS = Boolean((process.env.CM_CMS_USUARIO || '').trim() && process.env.CM_CMS_PASSWORD);
+  if (cfg.premiosMayores?.activo && hayCredCMS) add({
+    id: 'premios_mayores', capa: 3, sev: cfg.premiosMayores.sev || 'aviso', privada: true,
+    nombre: 'Bandeja de premios mayores (CMS)',
+    async run() {
+      const pm = cfg.premiosMayores;
+      const col = pm.coleccion || 'transactions';
+      const campo = pm.campoPendiente || 'pendingPrizeMajor';
+      const minimo = Number(pm.montoMinimo) || 10000;
+      const sevPM = pm.sev || 'aviso';
+
+      // 1) Sesion del CMS. Si falla -> NO VERIFICADO (visible), nunca "0" en silencio.
+      const s = await sesionCMS(cfg);
+      if (!s) return { ok: false, sev: sevPM, detalle: 'NO VERIFICADO: faltan credenciales del CMS (CM_CMS_USUARIO / CM_CMS_PASSWORD)' };
+      if (s.error) return { ok: false, sev: sevPM, detalle: `NO VERIFICADO: no pude iniciar sesion en el CMS: ${s.error}` };
+
+      // 2) Consulta la bandeja: transactions WHERE pendingPrizeMajor == true.
+      const cuerpo = JSON.stringify({ structuredQuery: {
+        from: [{ collectionId: col }],
+        where: { fieldFilter: { field: { fieldPath: campo }, op: 'EQUAL', value: { booleanValue: true } } },
+      } });
+      const r = await pedir(`${fsUrl(cfg, ':runQuery')}?key=${cfg.firebase.apiKeyPublica}`, {
+        metodo: 'POST', cuerpo, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.idToken}` },
+        timeoutMs: cfg.umbrales.timeoutMs, leerCuerpo: true, maxBytes: 900000, reintentosRed: 2,
+      });
+      if (!r.ok) return { ok: false, sev: sevPM, detalle: `NO VERIFICADO: no pude consultar la bandeja: ${r.error}`, ms: r.ms };
+      if (r.code !== 200) return { ok: false, sev: sevPM, detalle: `NO VERIFICADO: la consulta a la bandeja respondio HTTP ${r.code}`, ms: r.ms };
+      let filas;
+      try { filas = JSON.parse(r.texto).filter((x) => x.document); }
+      catch { return { ok: false, sev: sevPM, detalle: 'NO VERIFICADO: respuesta de la bandeja no interpretable', ms: r.ms }; }
+
+      // 3) Bandeja vacia -> ok, silencio (no se avisa nada).
+      if (!filas.length) return { ok: true, detalle: 'bandeja vacia: sin premios mayores pendientes de notificar', ms: r.ms };
+
+      // 4) Hay pendientes -> se avisa por CONTEO de documentos, sin descartar ninguno.
+      //    De cada documento se desglosan los premios >= minimo (monto/sorteo/nombre);
+      //    si uno no se puede desglosar, igual se incluye (nunca se cae un pendiente).
+      const fmt = (n) => '$' + Number(n).toLocaleString('es-MX', { maximumFractionDigits: 2 });
+      const lineas = [];
+      for (const f of filas) {
+        const d = {};
+        for (const [k, v] of Object.entries(f.document.fields || {})) d[k] = desenvolver(v);
+        const premios = (Array.isArray(d.matchPrizes) ? d.matchPrizes : []).filter((p) => Number(p?.bruto ?? 0) >= minimo);
+        if (premios.length) {
+          for (const p of premios) {
+            const sorteo = p.drawNumber ?? (Array.isArray(d.prizeDraws) ? d.prizeDraws[0] : '') ?? '';
+            lineas.push(`⭐ ${fmt(p.bruto)} — ${p.product || d.type || 'sorteo'} (sorteo #${sorteo})`);
+          }
+        } else {
+          const folio = (Array.isArray(d.prizeFolios) ? d.prizeFolios[0] : '') || (f.document.name || '').split('/').pop();
+          lineas.push(`⭐ premio mayor pendiente (monto/sorteo por confirmar en el CMS) — folio ${folio}`);
+        }
+      }
+      const extra = lineas.length > 10 ? `  (+${lineas.length - 10} mas)` : '';
+      return { ok: false, sev: sevPM, buenaNoticia: true, ms: r.ms,
+        detalle: `${filas.length} premio(s) mayor(es) en bandeja pendientes de notificar: ${lineas.slice(0, 10).join(' | ')}${extra}` };
+    },
+  });
 
   // gameResult paso a "solo con sesion" (cambio del equipo, 2026-09-07), asi que
   // esta revision ahora requiere la cuenta de prueba y vive en el perfil privado.
@@ -1148,10 +1257,16 @@ async function mandarTelegram(cfg, alertas, resumen) {
   const ic = { abre: '\u{1F534}', sigue: '\u{1F7E0}', cierra: '\u{2705}' };
   const lineas = [`<b>${cfg.nombre} — monitoreo</b>`, `<i>${new Date().toLocaleString('es-MX', { timeZone: cfg.tz })}</i>`, ''];
   for (const a of alertas) {
-    const t = a.tipo === 'cierra' ? `RESUELTO (${a.duracionMin} min)` : a.tipo === 'sigue' ? 'SIGUE FALLANDO' : a.sev.toUpperCase();
+    // buenaNoticia: no es una falla, es un aviso positivo (premio mayor en bandeja).
+    // Se muestra con estrella y encabezado propio, no con el rojo/naranja de un fallo.
+    const buena = a.buenaNoticia && a.tipo !== 'cierra';
+    const icono = buena ? '\u{2B50}' : ic[a.tipo];
+    const t = a.tipo === 'cierra' ? `RESUELTO (${a.duracionMin} min)`
+      : buena ? 'PREMIO MAYOR'
+      : a.tipo === 'sigue' ? 'SIGUE FALLANDO' : a.sev.toUpperCase();
     const contador = a.tipo !== 'cierra' && a.deAvisos ? `  (aviso ${a.aviso}/${a.deAvisos})` : '';
-    lineas.push(`${ic[a.tipo]} <b>${t}</b> — ${a.nombre}${contador}`);
-    lineas.push(`   <code>${String(a.detalle).slice(0, 300)}</code>`);
+    lineas.push(`${icono} <b>${t}</b> — ${a.nombre}${contador}`);
+    lineas.push(`   <code>${String(a.detalle).slice(0, 400)}</code>`);
     if (a.ultimoAviso) lineas.push('   <i>Ultimo aviso: se silencia hasta que cambie a resuelto.</i>');
     lineas.push('');
   }
@@ -1635,6 +1750,15 @@ async function main() {
     // que el workflow saca al log publico. Asi el estado del login es visible en cada
     // corrida sin alertar al grupo, para poder verificar que quedo arreglado.
     console.error(`MONITOR-SALUD sesion=${s && s.idToken ? 'OK' : 'FALLO'}${s && s.error ? ' (' + s.error + ')' : ''}`);
+  }
+
+  // Calentar la sesion del CMS (bandeja de premios mayores) igual que la de prueba, y
+  // publicar su salud por stderr. Es estado del MONITOR (no de la plataforma), asi que
+  // es seguro mostrarlo y sirve para verificar que el acceso de solo lectura sigue vivo.
+  const hayCredCMS = Boolean((process.env.CM_CMS_USUARIO || '').trim() && process.env.CM_CMS_PASSWORD);
+  if (hayCredCMS && cfg.premiosMayores?.activo && capas.includes(3)) {
+    const sc = await sesionCMS(cfg).catch(() => null);
+    console.error(`MONITOR-SALUD-CMS sesion=${sc && sc.idToken ? 'OK' : 'FALLO'}${sc && sc.error ? ' (' + sc.error + ')' : ''}`);
   }
 
   const t0 = Date.now();
